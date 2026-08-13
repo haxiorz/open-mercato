@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { EntityManager } from "@mikro-orm/postgresql";
+import { sql, type Kysely } from "kysely";
 import { makeCrudRoute } from "@open-mercato/shared/lib/crud/factory";
 import { CrudHttpError } from "@open-mercato/shared/lib/crud/errors";
 import {
@@ -17,7 +18,10 @@ import {
   CatalogProductVariant,
   CatalogProductTagAssignment,
 } from "../../data/entities";
-import { CATALOG_PRODUCT_TYPES } from "../../data/types";
+import {
+  CATALOG_PRODUCT_LIFECYCLE_STATES,
+  CATALOG_PRODUCT_TYPES,
+} from "../../data/types";
 import type { CatalogProductType } from "../../data/types";
 import {
   productCreateSchema,
@@ -67,6 +71,7 @@ const listSchema = z
     isActive: z.string().optional(),
     configurable: z.string().optional(),
     productType: z.enum(CATALOG_PRODUCT_TYPES).optional(),
+    lifecycleState: z.enum(CATALOG_PRODUCT_LIFECYCLE_STATES).optional(),
     channelIds: z.string().optional(),
     channelId: z.string().uuid().optional(),
     categoryIds: z.string().optional(),
@@ -181,6 +186,9 @@ export async function buildProductFilters(
   }
   if (query.productType) {
     filters.product_type = { $eq: query.productType };
+  }
+  if (query.lifecycleState) {
+    filters.lifecycle_state = { $eq: query.lifecycleState };
   }
   const scope = {
     organizationId: ctx.selectedOrganizationId ?? ctx.auth?.orgId ?? null,
@@ -376,7 +384,58 @@ type ProductListItem = Record<string, unknown> & {
   categories?: Array<Record<string, unknown>>;
   categoryIds?: string[];
   tags?: string[];
+  variants_count?: number;
 };
+
+type ProductVariantCountDatabase = {
+  catalog_product_variants: {
+    product_id: string;
+    organization_id: string;
+    tenant_id: string;
+    deleted_at: Date | null;
+  };
+};
+
+type ProductVariantCountRow = {
+  product_id: string | null;
+  count: string | number | bigint;
+};
+
+async function loadProductVariantCounts(
+  em: EntityManager,
+  productIds: string[],
+  scope: {
+    organizationId: string | null;
+    organizationIds: string[] | null;
+    tenantId: string | null;
+  },
+): Promise<Map<string, number>> {
+  const database = em.getKysely<ProductVariantCountDatabase>() as Kysely<ProductVariantCountDatabase>;
+  let query = database
+    .selectFrom("catalog_product_variants")
+    .select([
+      "product_id",
+      sql<string>`count(*)`.as("count"),
+    ])
+    .where("product_id", "in", productIds)
+    .where("deleted_at", "is", null);
+  if (scope.organizationId) {
+    query = query.where("organization_id", "=", scope.organizationId);
+  } else if (Array.isArray(scope.organizationIds) && scope.organizationIds.length > 0) {
+    query = query.where("organization_id", "in", scope.organizationIds);
+  }
+  if (scope.tenantId) {
+    query = query.where("tenant_id", "=", scope.tenantId);
+  }
+  const rows = (await query.groupBy("product_id").execute()) as ProductVariantCountRow[];
+  const counts = new Map<string, number>();
+  for (const row of rows) {
+    if (typeof row.product_id !== "string") continue;
+    const count = Number(row.count);
+    counts.set(row.product_id, Number.isFinite(count) ? count : 0);
+  }
+  return counts;
+}
 
 async function decorateProductsAfterList(
   payload: { items?: ProductListItem[] },
@@ -384,6 +443,9 @@ async function decorateProductsAfterList(
 ): Promise<void> {
   const items = Array.isArray(payload?.items) ? payload.items : [];
   if (!items.length) return;
+  for (const item of items) {
+    item.variants_count = 0;
+  }
   const productIds = items
     .map((item) => (typeof item.id === "string" ? item.id : null))
     .filter((id): id is string => !!id);
@@ -393,6 +455,12 @@ async function decorateProductsAfterList(
     const scope = {
       organizationId: ctx.selectedOrganizationId ?? ctx.auth?.orgId ?? null,
       tenantId: ctx.auth?.tenantId ?? null,
+    };
+    const variantCountScope = {
+      ...scope,
+      organizationIds: Array.isArray(ctx.organizationIds)
+        ? ctx.organizationIds
+        : null,
     };
     const offers = await findWithDecryption(
       em,
@@ -559,13 +627,16 @@ async function decorateProductsAfterList(
       tagsByProduct.set(productId, bucket);
     }
 
-    const variants = await findWithDecryption(
-      em,
-      CatalogProductVariant,
-      { product: { $in: productIds }, deletedAt: null, ...scope },
-      { fields: ["id", "product"] },
-      scope,
-    );
+    const [variants, variantCounts] = await Promise.all([
+      findWithDecryption(
+        em,
+        CatalogProductVariant,
+        { product: { $in: productIds }, deletedAt: null, ...scope },
+        { fields: ["id", "product"] },
+        scope,
+      ),
+      loadProductVariantCounts(em, productIds, variantCountScope),
+    ]);
     const variantToProduct = new Map<string, string>();
     for (const variant of variants) {
       const productId =
@@ -669,6 +740,7 @@ async function decorateProductsAfterList(
         pricingEntries.push(null);
         continue;
       }
+      item.variants_count = variantCounts.get(id) ?? 0;
       const offerEntries = offersByProduct.get(id) ?? [];
       item.offers = offerEntries;
       const channelIds = Array.from(
@@ -819,6 +891,7 @@ const crud = makeCrudRoute({
       "tax_rate_id",
       "tax_rate",
       F.product_type,
+      F.lifecycle_state,
       F.status_entry_id,
       F.primary_currency_code,
       F.default_unit,
@@ -913,6 +986,38 @@ const crud = makeCrudRoute({
       schema: rawBodySchema,
       mapInput: async ({ raw, ctx }) => {
         const { translate } = await resolveTranslations();
+        const carriesBasePrice =
+          typeof raw === "object" &&
+          raw !== null &&
+          Object.prototype.hasOwnProperty.call(raw, "basePrice");
+        if (carriesBasePrice) {
+          const rbacService = ctx.container.resolve("rbacService") as {
+            userHasAllFeatures: (
+              userId: string,
+              requiredFeatures: string[],
+              scope: { tenantId: string | null; organizationId: string | null },
+            ) => Promise<boolean>;
+          };
+          const allowed = ctx.auth
+            ? await rbacService.userHasAllFeatures(
+                ctx.auth.sub,
+                ["catalog.pricing.manage"],
+                {
+                  tenantId: ctx.auth.tenantId,
+                  organizationId:
+                    ctx.selectedOrganizationId ?? ctx.auth.orgId,
+                },
+              )
+            : false;
+          if (!allowed) {
+            throw new CrudHttpError(403, {
+              error: translate(
+                "api.errors.forbidden",
+                "Forbidden",
+              ),
+            });
+          }
+        }
         const parsed = parseScopedCommandInput(
           productCreateSchema,
           raw ?? {},
@@ -926,6 +1031,7 @@ const crud = makeCrudRoute({
       },
       response: ({ result }) => ({
         id: result?.productId ?? result?.id ?? null,
+        basePriceApplied: result?.basePriceApplied ?? false,
       }),
       status: 201,
     },
@@ -980,6 +1086,7 @@ const productListItemSchema = z.object({
   sku: z.string().nullable().optional(),
   handle: z.string().nullable().optional(),
   product_type: z.string().nullable().optional(),
+  lifecycle_state: z.enum(CATALOG_PRODUCT_LIFECYCLE_STATES).nullable(),
   status_entry_id: z.string().uuid().nullable().optional(),
   primary_currency_code: z.string().nullable().optional(),
   default_unit: z.string().nullable().optional(),
@@ -1043,7 +1150,13 @@ const productListItemSchema = z.object({
   categories: z.array(z.record(z.string(), z.unknown())).optional(),
   categoryIds: z.array(z.string()).optional(),
   tags: z.array(z.string()).optional(),
+  variants_count: z.number(),
   pricing: z.record(z.string(), z.unknown()).nullable().optional(),
+});
+
+const productCreateResponseSchema = z.object({
+  id: z.string().uuid().nullable(),
+  basePriceApplied: z.boolean(),
 });
 
 export const openApi = createCatalogCrudOpenApi({
@@ -1053,6 +1166,7 @@ export const openApi = createCatalogCrudOpenApi({
   listResponseSchema: createPagedListResponseSchema(productListItemSchema),
   create: {
     schema: productCreateSchema,
+    responseSchema: productCreateResponseSchema,
     description: "Creates a new product in the catalog.",
   },
   update: {

@@ -964,6 +964,7 @@
   "wms.backend.sku.quickActions.title": "Quick actions",
   "wms.backend.warehouses.nav.title": "Warehouses",
   "wms.backend.zones.nav.title": "Zones",
+  "wms.catalogStock.column": "Stock",
   "wms.common.active": "Active",
   "wms.common.inactive": "Inactive",
   "wms.errors.forbidden": "Forbidden",

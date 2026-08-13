@@ -2,7 +2,7 @@
 
 import * as React from 'react'
 import { extensionPoints } from '@open-mercato/core/modules/catalog/extension-points'
-import Link from 'next/link'
+import { useRouter } from 'next/navigation'
 import type { LegacyColumnDef as ColumnDef } from '@tanstack/react-table/legacy'
 import type { SortingState } from '@tanstack/react-table'
 import { DataTable, type DataTableExportFormat } from '@open-mercato/ui/backend/DataTable'
@@ -11,20 +11,38 @@ import { Button } from '@open-mercato/ui/primitives/button'
 import { RowActions } from '@open-mercato/ui/backend/RowActions'
 import { apiCall, readApiResultOrThrow, withScopedApiRequestHeaders } from '@open-mercato/ui/backend/utils/apiCall'
 import { flash } from '@open-mercato/ui/backend/FlashMessages'
-import { deleteCrud, buildCrudExportUrl } from '@open-mercato/ui/backend/utils/crud'
+import { deleteCrud, updateCrud, buildCrudExportUrl } from '@open-mercato/ui/backend/utils/crud'
 import { buildOptimisticLockHeader } from '@open-mercato/ui/backend/utils/optimisticLock'
 import { useCustomFieldDefs } from '@open-mercato/ui/backend/utils/customFieldDefs'
-import { applyCustomFieldVisibility } from '@open-mercato/ui/backend/utils/customFieldColumns'
+import { useCurrentUserId } from '@open-mercato/ui/backend/utils/useCurrentUserId'
 import type { FilterDef, FilterValues } from '@open-mercato/ui/backend/FilterBar'
 import type { FilterOption } from '@open-mercato/ui/backend/FilterOverlay'
-import { BooleanIcon } from '@open-mercato/ui/backend/ValueIcons'
-import { markdownToPlainText } from '@open-mercato/ui/backend/markdown/markdownToPlainText'
+import { StatusBadge } from '@open-mercato/ui/primitives/status-badge'
+import { Tag } from '@open-mercato/ui/primitives/tag'
+import { Package, RefreshCcw, Wrench } from 'lucide-react'
+import { Pagination } from '@open-mercato/ui/primitives/pagination'
 import { useOrganizationScopeVersion } from '@open-mercato/shared/lib/frontend/useOrganizationScope'
 import { useT } from '@open-mercato/shared/lib/i18n/context'
 import { useConfirmDialog } from '@open-mercato/ui/backend/confirm-dialog'
+import { surfaceRecordConflict } from '@open-mercato/ui/backend/conflicts'
 import { useAppEvent } from '@open-mercato/ui/backend/injection/useAppEvent'
 import { E } from '#generated/entities.ids.generated'
+import { CATALOG_PRODUCT_LIFECYCLE_STATES } from '../../data/types'
+import {
+  commercialKind,
+  commercialKindLabelKey,
+  deriveProductDisplayStatus,
+  formatProductPrice,
+  productLifecycleLabelKey,
+  productStatusDot,
+  productStatusMap,
+} from '../../lib/productPresentation'
 import { ProductImageCell } from './ProductImageCell'
+import { ProductsHero } from './ProductsHero'
+import { useCatalogProductStats } from './useCatalogProductStats'
+import { ProductsGridView, type ProductGridItem } from './ProductsGridView'
+import { ProductQuickCreateDialog } from './ProductQuickCreateDialog'
+import { ProductsToolbar } from './ProductsToolbar'
 
 type PricingScope = {
   variant_id?: string | null
@@ -59,6 +77,11 @@ type OfferInfo = {
   isActive: boolean
 }
 
+type CategoryInfo = {
+  id: string
+  name?: string | null
+}
+
 export type ProductRow = {
   id: string
   title: string
@@ -68,6 +91,8 @@ export type ProductRow = {
   handle?: string | null
   product_type?: string | null
   status_entry_id?: string | null
+  lifecycle_state?: string | null
+  variants_count?: number
   primary_currency_code?: string | null
   default_unit?: string | null
   default_media_id?: string | null
@@ -79,8 +104,11 @@ export type ProductRow = {
   created_at?: string
   updated_at?: string
   offers?: OfferInfo[]
+  categories?: CategoryInfo[]
   pricing?: PricingInfo
 } & Record<string, unknown>
+
+const VIEW_MODE_STORAGE_PREFIX = 'om.catalog.products.viewMode'
 
 type ProductsResponse = {
   items?: ProductRow[]
@@ -90,6 +118,18 @@ type ProductsResponse = {
 
 const PAGE_SIZE = 25
 const ENTITY_ID = E.catalog.catalog_product
+
+const COMMERCIAL_KIND_ICON: Record<'physical' | 'service' | 'subscription', React.ComponentType<{ className?: string }>> = {
+  physical: Package,
+  service: Wrench,
+  subscription: RefreshCcw,
+}
+
+const COMMERCIAL_KIND_FALLBACK: Record<'physical' | 'service' | 'subscription', string> = {
+  physical: 'Physical',
+  service: 'Service',
+  subscription: 'Subscription',
+}
 
 function formatDate(value?: string): string {
   if (!value) return '—'
@@ -131,20 +171,6 @@ function renderOffers(offers: OfferInfo[] | undefined): React.ReactNode {
   )
 }
 
-function renderPrice(pricing: PricingInfo | undefined, currency?: string | null, fallback = '—'): React.ReactNode {
-  if (!pricing) return <span className="text-xs text-muted-foreground">{fallback}</span>
-  const unit = pricing.unit_price_net ?? pricing.unit_price_gross
-  if (unit == null) return <span className="text-xs text-muted-foreground">{fallback}</span>
-  const formatted = `${currency ?? pricing.currency_code ?? ''} ${unit}`
-  const kind = pricing.kind ?? 'list'
-  return (
-    <div className="flex flex-col">
-      <span className="font-medium">{formatted.trim()}</span>
-      <span className="text-xs text-muted-foreground">{kind}</span>
-    </div>
-  )
-}
-
 export type ProductsDataTableSnapshot = {
   search: string
   filterValues: FilterValues
@@ -173,7 +199,12 @@ export default function ProductsDataTable({
   const t = useT()
   const { confirm, ConfirmDialogElement } = useConfirmDialog()
   const scopeVersion = useOrganizationScopeVersion()
+  const currentUserId = useCurrentUserId()
+  const router = useRouter()
   const [rows, setRows] = React.useState<ProductRow[]>([])
+  const [viewMode, setViewMode] = React.useState<'table' | 'grid'>('table')
+  const [quickCreateOpen, setQuickCreateOpen] = React.useState(false)
+  const [canManageProducts, setCanManageProducts] = React.useState(false)
   const [page, setPage] = React.useState(1)
   const [total, setTotal] = React.useState(0)
   const [totalPages, setTotalPages] = React.useState(1)
@@ -192,6 +223,46 @@ export default function ProductsDataTable({
   useAppEvent('catalog.product.*', () => {
     setReloadToken((token) => token + 1)
   })
+  const { stats, isLoading: statsLoading, error: statsError, reload: reloadStats } = useCatalogProductStats(scopeVersion)
+  React.useEffect(() => {
+    if (reloadToken > 0) reloadStats()
+  }, [reloadToken, reloadStats])
+  React.useEffect(() => {
+    if (!currentUserId) return
+    const storageKey = `${VIEW_MODE_STORAGE_PREFIX}.${currentUserId}`
+    const stored = window.localStorage.getItem(storageKey)
+    if (stored === 'grid' || stored === 'table') setViewMode(stored)
+  }, [currentUserId])
+  const handleViewModeChange = React.useCallback(
+    (mode: string) => {
+      if (mode !== 'table' && mode !== 'grid') return
+      setViewMode(mode)
+      if (currentUserId) {
+        window.localStorage.setItem(`${VIEW_MODE_STORAGE_PREFIX}.${currentUserId}`, mode)
+      }
+    },
+    [currentUserId],
+  )
+  React.useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const res = await apiCall<{ ok?: boolean; granted?: string[] }>('/api/auth/feature-check', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ features: ['catalog.products.manage'] }),
+        })
+        if (!cancelled && res.ok) {
+          setCanManageProducts(Array.isArray(res.result?.granted) && res.result.granted.includes('catalog.products.manage'))
+        }
+      } catch {
+        if (!cancelled) setCanManageProducts(false)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [scopeVersion])
   const [customFieldsetFilter, setCustomFieldsetFilter] = React.useState<string | null>(null)
   const { data: customFieldDefs = [] } = useCustomFieldDefs(ENTITY_ID, {
     keyExtras: [scopeVersion, reloadToken],
@@ -329,6 +400,8 @@ export default function ProductsDataTable({
     { value: 'configurable', label: t('catalog.products.types.configurable', 'Configurable') },
     { value: 'virtual', label: t('catalog.products.types.virtual', 'Virtual') },
     { value: 'downloadable', label: t('catalog.products.types.downloadable', 'Downloadable') },
+    { value: 'service', label: t('catalog.products.types.service', 'Service') },
+    { value: 'subscription', label: t('catalog.products.types.subscription', 'Subscription') },
     {
       value: 'bundle',
       label: `${t('catalog.products.types.bundle', 'Bundle')} (${t('common.comingSoon', 'Coming soon')})`,
@@ -339,14 +412,15 @@ export default function ProductsDataTable({
     },
   ], [t])
 
-  const productTypeLabelMap = React.useMemo(() => {
-    const map = new Map<string, string>()
-    productTypeOptions.forEach((opt) => map.set(opt.value, opt.label))
-    return map
-  }, [productTypeOptions])
+  const lifecycleOptions = React.useMemo<FilterOption[]>(
+    () => CATALOG_PRODUCT_LIFECYCLE_STATES.map((state) => ({
+      value: state,
+      label: t(`catalog.products.lifecycle.${state}`, state),
+    })),
+    [t],
+  )
 
   const filters = React.useMemo<FilterDef[]>(() => [
-    { id: 'status', label: t('catalog.products.filters.status'), type: 'text' },
     { id: 'isActive', label: t('catalog.products.filters.active'), type: 'checkbox' },
     { id: 'configurable', label: t('catalog.products.filters.configurable'), type: 'checkbox' },
     { id: 'productType', label: t('catalog.products.filters.productType', 'Type'), type: 'select', options: productTypeOptions },
@@ -408,22 +482,39 @@ export default function ProductsDataTable({
       },
       {
         accessorKey: 'title',
-        header: t('catalog.products.table.title', 'Title'),
-        cell: ({ row }) => (
-          <div className="flex flex-col">
-            <span className="font-medium">{row.original.title || '—'}</span>
-            {row.original.subtitle ? (
-              <span className="text-xs text-muted-foreground">{row.original.subtitle}</span>
-            ) : null}
-            {row.original.handle ? (
-              <span className="text-xs text-muted-foreground">/{row.original.handle}</span>
-            ) : null}
-            {row.original.description ? (
-              <span className="text-xs text-muted-foreground">{markdownToPlainText(row.original.description)}</span>
-            ) : null}
-          </div>
-        ),
+        header: t('catalog.products.table.product', 'Product'),
+        cell: ({ row }) => {
+          const categories = Array.isArray(row.original.categories) ? row.original.categories : []
+          const categoryName = categories
+            .map((entry) => (typeof entry?.name === 'string' ? entry.name.trim() : ''))
+            .find((name) => name.length) ?? null
+          return (
+            <div className="flex flex-col">
+              <span className="font-medium">{row.original.title || '—'}</span>
+              {categoryName ? (
+                <span className="text-xs text-muted-foreground">{categoryName}</span>
+              ) : null}
+            </div>
+          )
+        },
         meta: { sticky: true },
+      },
+      {
+        id: 'type',
+        header: t('catalog.products.table.type', 'Type'),
+        enableSorting: false,
+        cell: ({ row }) => {
+          const kind = commercialKind(
+            typeof row.original.product_type === 'string' ? row.original.product_type : 'simple',
+          )
+          const TypeIcon = COMMERCIAL_KIND_ICON[kind]
+          return (
+            <Tag variant="neutral" shape="square">
+              <TypeIcon className="size-3 shrink-0" aria-hidden />
+              {t(commercialKindLabelKey(kind), COMMERCIAL_KIND_FALLBACK[kind])}
+            </Tag>
+          )
+        },
       },
       {
         accessorKey: 'sku',
@@ -434,42 +525,59 @@ export default function ProductsDataTable({
         },
       },
       {
-        accessorKey: 'product_type',
-        header: t('catalog.products.table.type'),
+        accessorKey: 'pricing',
+        header: t('catalog.products.table.price'),
         cell: ({ row }) => {
-          const type = typeof row.original.product_type === 'string' ? row.original.product_type : 'simple'
-          const label = productTypeLabelMap.get(type) ?? type
-          return <span className="text-xs text-muted-foreground">{label}</span>
+          const price = formatProductPrice(
+            row.original.pricing ?? null,
+            typeof row.original.default_sales_unit === 'string' ? row.original.default_sales_unit : null,
+            typeof row.original.primary_currency_code === 'string' ? row.original.primary_currency_code : null,
+          )
+          if (!price.amount) return <span className="text-sm text-muted-foreground">—</span>
+          return (
+            <span className="text-sm font-semibold text-foreground">
+              {price.amount}
+              {price.suffix ? (
+                <span className="ml-0.5 font-normal text-muted-foreground">{price.suffix}</span>
+              ) : null}
+            </span>
+          )
         },
       },
       {
-        accessorKey: 'is_configurable',
-        header: t('catalog.products.table.configurable'),
-        cell: ({ row }) => <BooleanIcon value={!!row.original.is_configurable} />,
+        id: 'lifecycle_status',
+        header: t('catalog.products.table.status', 'Status'),
+        enableSorting: false,
+        cell: ({ row }) => {
+          const status = deriveProductDisplayStatus({
+            lifecycleState: typeof row.original.lifecycle_state === 'string' ? row.original.lifecycle_state : null,
+            isActive: typeof row.original.is_active === 'boolean' ? row.original.is_active : null,
+          })
+          return (
+            <StatusBadge variant={productStatusMap[status]} dot={productStatusDot[status]}>
+              {t(productLifecycleLabelKey(status), status)}
+            </StatusBadge>
+          )
+        },
       },
       {
-        accessorKey: 'is_active',
-        header: t('catalog.products.table.active'),
-        cell: ({ row }) => <BooleanIcon value={!!row.original.is_active} />,
-      },
-      {
-        accessorKey: 'pricing',
-        header: t('catalog.products.table.price'),
-        cell: ({ row }) => renderPrice(row.original.pricing, row.original.primary_currency_code),
-      },
-      {
-        accessorKey: 'offers',
-        header: t('catalog.products.table.channels'),
-        cell: ({ row }) => renderOffers(row.original.offers),
-      },
-      {
-        accessorKey: 'updated_at',
-        header: t('catalog.products.table.updatedAt'),
-        cell: ({ row }) => <span className="text-xs text-muted-foreground">{formatDate(row.original.updated_at)}</span>,
+        id: 'offers',
+        header: t('catalog.products.table.offers', 'Offers'),
+        enableSorting: false,
+        cell: ({ row }) => {
+          const offers = Array.isArray(row.original.offers) ? row.original.offers : []
+          const activeCount = offers.filter((offer) => offer?.isActive).length
+          if (activeCount === 0) return <span className="text-sm text-muted-foreground">—</span>
+          return (
+            <span className="text-sm text-muted-foreground">
+              {t('catalog.products.table.offersCount', '{count} offers', { count: activeCount })}
+            </span>
+          )
+        },
       },
     ]
-    return applyCustomFieldVisibility(base, customFieldDefs)
-  }, [customFieldDefs, productTypeLabelMap, t])
+    return base
+  }, [t])
 
   const handleSearchChange = React.useCallback((value: string) => {
     setSearch(value)
@@ -504,10 +612,6 @@ export default function ProductsDataTable({
     [customFieldsetFilter],
   )
 
-  const handleRefresh = React.useCallback(() => {
-    setReloadToken((token) => token + 1)
-  }, [])
-
   const queryParams = React.useMemo(() => {
     const params = new URLSearchParams()
     params.set('page', String(page))
@@ -518,9 +622,8 @@ export default function ProductsDataTable({
       params.set('sortField', sort.id)
       params.set('sortDir', sort.desc ? 'desc' : 'asc')
     }
-    const status = filterValues.status
-    if (typeof status === 'string' && status.trim()) {
-      params.set('status', status.trim())
+    if (typeof filterValues.lifecycleState === 'string' && filterValues.lifecycleState) {
+      params.set('lifecycleState', filterValues.lifecycleState)
     }
     if (filterValues.isActive === true) params.set('isActive', 'true')
     if (filterValues.isActive === false) params.set('isActive', 'false')
@@ -641,6 +744,47 @@ export default function ProductsDataTable({
     }
   }, [confirm, t])
 
+  const handleLifecycleTransition = React.useCallback(
+    async (row: ProductRow, nextState: 'archived' | 'active') => {
+      if (nextState === 'archived') {
+        const confirmed = await confirm({
+          title: t('catalog.products.list.archiveConfirm', 'Archive this product?'),
+          description: t(
+            'catalog.products.list.archiveConfirmDescription',
+            'Archived products move to the Archived tab. They keep their offers and prices.',
+          ),
+        })
+        if (!confirmed) return
+      }
+      try {
+        const headers = buildOptimisticLockHeader(typeof row.updated_at === 'string' ? row.updated_at : null)
+        await withScopedApiRequestHeaders(headers, () => (
+          updateCrud('catalog/products', { id: row.id, lifecycleState: nextState }, {
+            errorMessage: t('catalog.products.list.error.lifecycle', 'Failed to update product status'),
+          })
+        ))
+        flash(
+          nextState === 'archived'
+            ? t('catalog.products.flash.archived', 'Product archived')
+            : t('catalog.products.flash.restored', 'Product restored'),
+          'success',
+        )
+        setReloadToken((token) => token + 1)
+      } catch (error) {
+        if (surfaceRecordConflict(error, t)) {
+          setReloadToken((token) => token + 1)
+          return
+        }
+        const message =
+          error instanceof Error
+            ? error.message
+            : t('catalog.products.list.error.lifecycle', 'Failed to update product status')
+        flash(message, 'error')
+      }
+    },
+    [confirm, t],
+  )
+
   React.useEffect(() => {
     if (!onSnapshotChange) return
     onSnapshotChange({ search, filterValues, total })
@@ -659,93 +803,180 @@ export default function ProductsDataTable({
     },
   }), [currentParams])
 
+  const handleSortingChange = React.useCallback((updater: React.SetStateAction<SortingState>) => {
+    setSorting(updater)
+    setPage(1)
+  }, [])
+
+  const toolbarElement = (
+    <ProductsToolbar
+      search={search}
+      onSearchChange={handleSearchChange}
+      searchPlaceholder={t('catalog.products.list.searchPlaceholder', 'Search products, SKU, EAN…')}
+      filterValues={filterValues}
+      onFilterChange={(patch) => handleFiltersApply({ ...filterValues, ...patch })}
+      productTypeOptions={productTypeOptions}
+      lifecycleOptions={lifecycleOptions}
+      loadCategoryOptions={loadCategoryOptions}
+      sorting={sorting}
+      onSortingChange={handleSortingChange}
+      viewMode={viewMode}
+      onViewModeChange={handleViewModeChange}
+    />
+  )
+
+  const gridItems = React.useMemo<ProductGridItem[]>(() => rows.map((row) => ({
+    id: row.id,
+    title: row.title,
+    sku: typeof row.sku === 'string' ? row.sku : null,
+    productType: typeof row.product_type === 'string' ? row.product_type : 'simple',
+    lifecycleState: typeof row.lifecycle_state === 'string' ? row.lifecycle_state : null,
+    isActive: row.is_active !== false,
+    defaultMediaUrl: typeof row.default_media_url === 'string' ? row.default_media_url : null,
+    categories: (Array.isArray(row.categories) ? row.categories : [])
+      .map((entry) => (typeof entry?.name === 'string' ? entry.name : null))
+      .filter((name): name is string => !!name),
+    pricing: row.pricing ?? null,
+    salesUnit: typeof row.default_sales_unit === 'string' ? row.default_sales_unit : null,
+    variantsCount: typeof row.variants_count === 'number' ? row.variants_count : 0,
+  })), [rows])
+
+  const openProduct = React.useCallback((item: ProductGridItem) => {
+    router.push(`/backend/catalog/products/${item.id}`)
+  }, [router])
+
+  const heroElement = (
+    <ProductsHero
+      stats={stats}
+      isLoading={statsLoading}
+      error={statsError}
+      actions={canManageProducts ? (
+        <>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => flash(t('catalog.products.customizeView.comingSoon', 'View customization is coming soon.'), 'info')}
+          >
+            {t('catalog.products.actions.customizeView', 'Customize view')}
+          </Button>
+          <Button type="button" onClick={() => setQuickCreateOpen(true)}>
+            {t('catalog.products.actions.addProduct', 'Add product')}
+          </Button>
+        </>
+      ) : null}
+    />
+  )
+
   return (
-    <>
-      <DataTable<ProductRow>
-        title={t('catalog.products.page.title', 'Products & services')}
-        entityId={ENTITY_ID}
-        customFieldFilterKeyExtras={[scopeVersion, reloadToken]}
-        refreshButton={{
-          label: t('catalog.products.actions.refresh', 'Refresh'),
-          onRefresh: handleRefresh,
-          isRefreshing: isLoading,
-        }}
-        actions={(
-          <div className="flex items-center gap-2">
-            {extraActions}
-            <Button asChild>
-              <Link href="/backend/catalog/products/create">
-                {t('catalog.products.actions.create', 'Create')}
-              </Link>
-            </Button>
-          </div>
-        )}
-        columns={columns}
-        data={rows}
-        emptyState={(
-          <ListEmptyState
-            entityName={t('catalog.products.page.title', 'Products & services')}
-            createHref="/backend/catalog/products/create"
-            createLabel={t('catalog.products.actions.create', 'Create')}
+    <div className="flex flex-col gap-4">
+      {heroElement}
+      {toolbarElement}
+      {viewMode === 'grid' ? (
+        <div className="flex flex-col gap-4">
+          <ProductsGridView
+            items={gridItems}
+            isLoading={isLoading}
+            emptyState={(
+              <ListEmptyState
+                entityName={t('catalog.products.page.title', 'Products & services')}
+                createHref="/backend/catalog/products/create"
+                createLabel={t('catalog.products.actions.create', 'Create')}
+              />
+            )}
+            onOpen={openProduct}
           />
-        )}
-        searchValue={search}
-        onSearchChange={handleSearchChange}
-        filters={filters}
-        filterValues={filterValues}
-        onFiltersApply={handleFiltersApply}
-        onFiltersClear={handleFiltersClear}
-        onCustomFieldFilterFieldsetChange={handleCustomFieldsetFilterChange}
-        sorting={sorting}
-        onSortingChange={setSorting}
-        injectionSpotId={extensionPoints.hosts.productsTable.baseSpotId}
-        injectionContext={{
-          search,
-          filters: filterValues,
-          customFieldset: customFieldsetFilter,
-          page,
-          sorting,
-          scopeVersion,
-          // Step 5.15: surface `total` so the merchandising AI widget
-          // (rendered in `data-table:catalog.products:header`) can build
-          // a selection-aware pageContext per spec §10.1 without taking a
-          // dependency on the host page.
-          total,
-          totalMatching: total,
-        }}
-        pagination={{
-          page,
-          pageSize: PAGE_SIZE,
-          total,
-          totalPages,
-          onPageChange: setPage,
-          cacheStatus,
-        }}
-        exporter={exportConfig}
-        isLoading={isLoading}
-        perspective={{ tableId: extensionPoints.hosts.productsTable.tableId }}
-        stickyActionsColumn
-        rowActions={(row) => (
-          <RowActions
-            items={[
-              {
-                id: 'edit',
-                label: t('catalog.products.table.actions.edit', 'Edit'),
-                href: `/backend/catalog/products/${row.id}`,
-              },
-              {
-                id: 'delete',
-                label: t('catalog.products.table.actions.delete', 'Delete'),
-                destructive: true,
-                onSelect: () => {
-                  void handleDelete(row)
-                },
-              },
-            ]}
+          <Pagination page={page} pageSize={PAGE_SIZE} total={total} onPageChange={setPage} />
+        </div>
+      ) : (
+        <DataTable<ProductRow>
+            embedded
+            actions={extraActions}
+            columns={columns}
+            data={rows}
+            emptyState={(
+              <ListEmptyState
+                entityName={t('catalog.products.page.title', 'Products & services')}
+                createHref="/backend/catalog/products/create"
+                createLabel={t('catalog.products.actions.create', 'Create')}
+              />
+            )}
+            sorting={sorting}
+            onSortingChange={handleSortingChange}
+            injectionSpotId={extensionPoints.hosts.productsTable.baseSpotId}
+            injectionContext={{
+              search,
+              filters: filterValues,
+              customFieldset: customFieldsetFilter,
+              page,
+              sorting,
+              scopeVersion,
+              // Step 5.15: surface `total` so the merchandising AI widget
+              // (rendered in `data-table:catalog.products:header`) can build
+              // a selection-aware pageContext per spec §10.1 without taking a
+              // dependency on the host page.
+              total,
+              totalMatching: total,
+            }}
+            pagination={{
+              page,
+              pageSize: PAGE_SIZE,
+              total,
+              totalPages,
+              onPageChange: setPage,
+              cacheStatus,
+            }}
+            isLoading={isLoading}
+            stickyActionsColumn
+            rowActions={(row) => {
+              const status = deriveProductDisplayStatus({
+                lifecycleState: typeof row.lifecycle_state === 'string' ? row.lifecycle_state : null,
+                isActive: typeof row.is_active === 'boolean' ? row.is_active : null,
+              })
+              return (
+                <RowActions
+                  items={[
+                    {
+                      id: 'edit',
+                      label: t('catalog.products.table.actions.edit', 'Edit'),
+                      href: `/backend/catalog/products/${row.id}`,
+                    },
+                    ...(status === 'archived'
+                      ? [{
+                          id: 'restore',
+                          label: t('catalog.products.table.actions.restore', 'Restore'),
+                          onSelect: () => {
+                            void handleLifecycleTransition(row, 'active')
+                          },
+                        }]
+                      : [{
+                          id: 'archive',
+                          label: t('catalog.products.table.actions.archive', 'Archive'),
+                          onSelect: () => {
+                            void handleLifecycleTransition(row, 'archived')
+                          },
+                        }]),
+                    {
+                      id: 'delete',
+                      label: t('catalog.products.table.actions.delete', 'Delete'),
+                      destructive: true,
+                      onSelect: () => {
+                        void handleDelete(row)
+                      },
+                    },
+                  ]}
+                />
+              )
+            }}
           />
-        )}
+      )}
+      <ProductQuickCreateDialog
+        open={quickCreateOpen}
+        onOpenChange={setQuickCreateOpen}
+        onCreated={() => {
+          setReloadToken((token) => token + 1)
+        }}
       />
       {ConfirmDialogElement}
-    </>
+    </div>
   )
 }

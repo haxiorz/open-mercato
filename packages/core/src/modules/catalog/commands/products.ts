@@ -36,6 +36,7 @@ import {
   CatalogProduct,
   CatalogProductVariant,
   CatalogProductPrice,
+  CatalogPriceKind,
   CatalogProductUnitConversion,
   CatalogOptionSchemaTemplate,
   CatalogProductCategory,
@@ -54,6 +55,7 @@ import {
 import type {
   CatalogExciseCategory,
   CatalogHazmatPackingGroup,
+  CatalogProductLifecycleState,
   CatalogProductOptionSchema,
   CatalogProductType,
 } from "../data/types";
@@ -80,6 +82,20 @@ import {
   resolveCanonicalUnitCode,
 } from "../lib/unitResolution";
 
+type CreatedProductPriceSnapshot = {
+  id: string;
+  priceKindId: string;
+  currencyCode: string;
+  kind: string;
+  minQuantity: number;
+  unitPriceNet: string | null;
+  unitPriceGross: string | null;
+  taxRate: string | null;
+  taxAmount: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
 type ProductSnapshot = {
   id: string;
   organizationId: string;
@@ -92,6 +108,7 @@ type ProductSnapshot = {
   taxRateId: string | null;
   taxRate: string | null;
   productType: CatalogProductType;
+  lifecycleState: CatalogProductLifecycleState;
   statusEntryId: string | null;
   primaryCurrencyCode: string | null;
   defaultUnit: string | null;
@@ -143,6 +160,7 @@ type ProductSnapshot = {
   offers: OfferSnapshot[];
   tags: string[];
   categoryIds: string[];
+  createdPrices?: CreatedProductPriceSnapshot[];
   custom: Record<string, unknown> | null;
 };
 
@@ -1081,9 +1099,49 @@ async function resolveOptionSchemaTemplateForRemoval(
   return template;
 }
 
+async function loadCreatedProductPrices(
+  em: EntityManager,
+  product: CatalogProduct,
+): Promise<CreatedProductPriceSnapshot[]> {
+  const records = await findWithDecryption(
+    em,
+    CatalogProductPrice,
+    {
+      product: product.id,
+      variant: null,
+      offer: null,
+    },
+    { populate: ["priceKind"] },
+    {
+      tenantId: product.tenantId,
+      organizationId: product.organizationId,
+    },
+  );
+  return records.map((record) => {
+    const priceKindId =
+      typeof record.priceKind === "string"
+        ? record.priceKind
+        : record.priceKind.id;
+    return {
+      id: record.id,
+      priceKindId,
+      currencyCode: record.currencyCode,
+      kind: record.kind,
+      minQuantity: record.minQuantity,
+      unitPriceNet: record.unitPriceNet ?? null,
+      unitPriceGross: record.unitPriceGross ?? null,
+      taxRate: record.taxRate ?? null,
+      taxAmount: record.taxAmount ?? null,
+      createdAt: record.createdAt.toISOString(),
+      updatedAt: record.updatedAt.toISOString(),
+    };
+  });
+}
+
 async function loadProductSnapshot(
   em: EntityManager,
   id: string,
+  options?: { includeCreatedPrices?: boolean },
 ): Promise<ProductSnapshot | null> {
   const record = await findOneWithDecryption(
     em,
@@ -1155,6 +1213,9 @@ async function loadProductSnapshot(
   const metadata = measurements.metadata
     ? cloneJson(measurements.metadata)
     : null;
+  const createdPrices = options?.includeCreatedPrices
+    ? await loadCreatedProductPrices(em, record)
+    : undefined;
   return {
     id: record.id,
     organizationId: record.organizationId,
@@ -1167,6 +1228,7 @@ async function loadProductSnapshot(
     taxRateId: record.taxRateId ?? null,
     taxRate: record.taxRate ?? null,
     productType: record.productType,
+    lifecycleState: record.lifecycleState ?? "active",
     statusEntryId: record.statusEntryId ?? null,
     primaryCurrencyCode: record.primaryCurrencyCode ?? null,
     defaultUnit: record.defaultUnit ?? null,
@@ -1222,6 +1284,7 @@ async function loadProductSnapshot(
     offers,
     tags,
     categoryIds,
+    createdPrices,
     custom: Object.keys(custom).length ? custom : null,
   };
 }
@@ -1241,6 +1304,7 @@ function productSeedFromSnapshot(
     taxRateId: snapshot.taxRateId ?? null,
     taxRate: snapshot.taxRate ?? null,
     productType: snapshot.productType ?? "simple",
+    lifecycleState: snapshot.lifecycleState ?? "active",
     statusEntryId: snapshot.statusEntryId ?? null,
     primaryCurrencyCode: snapshot.primaryCurrencyCode ?? null,
     defaultUnit: snapshot.defaultUnit ?? null,
@@ -1310,6 +1374,7 @@ function applyProductSnapshot(
   record.taxRateId = snapshot.taxRateId ?? null;
   record.taxRate = snapshot.taxRate ?? null;
   record.productType = snapshot.productType;
+  record.lifecycleState = snapshot.lifecycleState ?? "active";
   record.statusEntryId = snapshot.statusEntryId ?? null;
   record.primaryCurrencyCode = snapshot.primaryCurrencyCode ?? null;
   record.defaultUnit = snapshot.defaultUnit ?? null;
@@ -1370,9 +1435,47 @@ function applyProductSnapshot(
   record.updatedAt = new Date(snapshot.updatedAt);
 }
 
+function restoreCreatedProductPrices(
+  em: EntityManager,
+  product: CatalogProduct,
+  snapshots: CreatedProductPriceSnapshot[],
+): CatalogProductPrice[] {
+  return snapshots.map((snapshot) => {
+    const record = em.create(CatalogProductPrice, {
+      id: snapshot.id,
+      organizationId: product.organizationId,
+      tenantId: product.tenantId,
+      variant: null,
+      product,
+      offer: null,
+      priceKind: em.getReference(CatalogPriceKind, snapshot.priceKindId),
+      currencyCode: snapshot.currencyCode,
+      kind: snapshot.kind,
+      minQuantity: snapshot.minQuantity,
+      maxQuantity: null,
+      unitPriceNet: snapshot.unitPriceNet,
+      unitPriceGross: snapshot.unitPriceGross,
+      taxRate: snapshot.taxRate,
+      taxAmount: snapshot.taxAmount,
+      channelId: null,
+      userId: null,
+      userGroupId: null,
+      customerId: null,
+      customerGroupId: null,
+      metadata: null,
+      startsAt: null,
+      endsAt: null,
+      createdAt: new Date(snapshot.createdAt),
+      updatedAt: new Date(snapshot.updatedAt),
+    });
+    em.persist(record);
+    return record;
+  });
+}
+
 const createProductCommand: CommandHandler<
   ProductCreateInput,
-  { productId: string }
+  { productId: string; basePriceApplied: boolean }
 > = {
   id: "catalog.products.create",
   async execute(rawInput, ctx) {
@@ -1418,6 +1521,36 @@ const createProductCommand: CommandHandler<
       defaultUnit: parsed.defaultUnit ?? null,
       defaultSalesUnit: parsed.defaultSalesUnit ?? parsed.defaultUnit ?? null,
     });
+    const productType = parsed.productType ?? "simple";
+    const regularPriceKind = parsed.basePrice
+      ? await findOneWithDecryption(
+          em,
+          CatalogPriceKind,
+          {
+            code: "regular",
+            tenantId: parsed.tenantId,
+            deletedAt: null,
+          },
+          undefined,
+          {
+            tenantId: parsed.tenantId,
+            organizationId: parsed.organizationId,
+          },
+        )
+      : null;
+    const basePriceApplied = Boolean(
+      parsed.basePrice && regularPriceKind && regularPriceKind.isActive !== false,
+    );
+    const priceCommandHelpers = basePriceApplied
+      ? await import("./prices")
+      : null;
+    const basePriceCreation: {
+      record: CatalogProductPrice | null;
+      custom: Record<string, unknown>;
+    } = {
+      record: null,
+      custom: {},
+    };
     const productId = randomUUID();
     const record = em.create(CatalogProduct, {
       id: productId,
@@ -1430,7 +1563,8 @@ const createProductCommand: CommandHandler<
       handle: parsed.handle ?? null,
       taxRateId,
       taxRate,
-      productType: parsed.productType ?? "simple",
+      productType,
+      lifecycleState: parsed.lifecycleState ?? "active",
       statusEntryId: parsed.statusEntryId ?? null,
       primaryCurrencyCode: parsed.primaryCurrencyCode ?? null,
       defaultUnit: resolvedUnits.defaultUnit,
@@ -1473,7 +1607,11 @@ const createProductCommand: CommandHandler<
       minOrderQty: parsed.minOrderQty ?? null,
       maxOrderQty: parsed.maxOrderQty ?? null,
       orderQtyIncrement: parsed.orderQtyIncrement ?? null,
-      requiresShipping: parsed.requiresShipping ?? true,
+      requiresShipping:
+        parsed.requiresShipping ??
+        (productType === "service" || productType === "subscription"
+          ? false
+          : true),
       isQuoteOnly: parsed.isQuoteOnly ?? false,
       seoTitle: parsed.seoTitle ?? null,
       seoDescription: parsed.seoDescription ?? null,
@@ -1508,15 +1646,42 @@ const createProductCommand: CommandHandler<
       );
     }
     em.persist(record);
+    const phases: Array<() => void | Promise<void>> = [
+      () => em.flush(),
+      () => syncOffers(em, record, parsed.offers),
+      () => syncCategoryAssignments(em, record, parsed.categoryIds),
+      () => syncProductTags(em, record, parsed.tags),
+    ];
+    const basePrice = parsed.basePrice;
+    if (
+      basePrice &&
+      regularPriceKind &&
+      basePriceApplied &&
+      priceCommandHelpers
+    ) {
+      phases.push(async () => {
+        const creation = await priceCommandHelpers.createCatalogPriceRecord(
+          {
+            productId: record.id,
+            organizationId: record.organizationId,
+            tenantId: record.tenantId,
+            priceKindId: regularPriceKind.id,
+            currencyCode: basePrice.currencyCode,
+            unitPriceNet: basePrice.unitPriceNet,
+            taxRate: basePrice.taxRate,
+            minQuantity: 1,
+          },
+          ctx,
+          { em, product: record, priceKind: regularPriceKind },
+        );
+        basePriceCreation.record = creation.record;
+        basePriceCreation.custom = creation.custom;
+      });
+    }
     try {
       await withAtomicFlush(
         em,
-        [
-          () => em.flush(),
-          () => syncOffers(em, record, parsed.offers),
-          () => syncCategoryAssignments(em, record, parsed.categoryIds),
-          () => syncProductTags(em, record, parsed.tags),
-        ],
+        phases,
         { transaction: true },
       );
     } catch (error) {
@@ -1531,16 +1696,27 @@ const createProductCommand: CommandHandler<
       tenantId: record.tenantId,
       values: custom,
     });
+    if (basePriceCreation.record && priceCommandHelpers) {
+      await priceCommandHelpers.finalizeCatalogPriceCreation(
+        {
+          record: basePriceCreation.record,
+          custom: basePriceCreation.custom,
+        },
+        ctx,
+      );
+    }
     await emitProductCrudChange({
       dataEngine,
       action: "created",
       product: record,
     });
-    return { productId: record.id };
+    return { productId: record.id, basePriceApplied };
   },
   captureAfter: async (_input, result, ctx) => {
     const em = (ctx.container.resolve("em") as EntityManager).fork();
-    return loadProductSnapshot(em, result.productId);
+    return loadProductSnapshot(em, result.productId, {
+      includeCreatedPrices: result.basePriceApplied,
+    });
   },
   buildLog: async ({ result, snapshots }) => {
     const after = snapshots.after as ProductSnapshot | undefined;
@@ -1572,8 +1748,44 @@ const createProductCommand: CommandHandler<
     if (!record) return;
     ensureTenantScope(ctx, record.tenantId);
     ensureOrganizationScope(ctx, record.organizationId);
-    em.remove(record);
-    await em.flush();
+    const createdPriceIds = (after.createdPrices ?? []).map(
+      (price) => price.id,
+    );
+    const removedPriceRecords = createdPriceIds.length
+      ? await findWithDecryption(
+          em,
+          CatalogProductPrice,
+          {
+            id: { $in: createdPriceIds },
+            product: record.id,
+            organizationId: record.organizationId,
+            tenantId: record.tenantId,
+          },
+          undefined,
+          { organizationId: record.organizationId, tenantId: record.tenantId },
+        )
+      : [];
+    const phases: Array<() => void | Promise<void>> = [];
+    if (createdPriceIds.length) {
+      phases.push(async () => {
+        await em.nativeDelete(CatalogProductPrice, {
+          id: { $in: createdPriceIds },
+          product: record.id,
+          organizationId: record.organizationId,
+          tenantId: record.tenantId,
+        });
+      });
+    }
+    phases.push(() => {
+      em.remove(record);
+    });
+    await withAtomicFlush(em, phases, { transaction: true });
+    if (removedPriceRecords.length) {
+      const { emitCatalogPriceDeletionSideEffects } = await import("./prices");
+      for (const removedPrice of removedPriceRecords) {
+        await emitCatalogPriceDeletionSideEffects(removedPrice, ctx);
+      }
+    }
     const dataEngine = ctx.container.resolve("dataEngine") as DataEngine;
     const resetValues = buildCustomFieldResetMap(
       undefined,
@@ -1610,15 +1822,24 @@ const createProductCommand: CommandHandler<
       () => productSeedFromSnapshot(after),
     );
     applyProductSnapshot(em, record, after);
+    const restoredPrices: CatalogProductPrice[] = [];
     try {
+      const phases: Array<() => void | Promise<void>> = [
+        () => em.flush(),
+        () => restoreOffersFromSnapshot(em, record, after.offers),
+        () => syncCategoryAssignments(em, record, after.categoryIds),
+        () => syncProductTags(em, record, after.tags),
+      ];
+      if (after.createdPrices?.length) {
+        phases.push(() => {
+          restoredPrices.push(
+            ...restoreCreatedProductPrices(em, record, after.createdPrices ?? []),
+          );
+        });
+      }
       await withAtomicFlush(
         em,
-        [
-          () => em.flush(),
-          () => restoreOffersFromSnapshot(em, record, after.offers),
-          () => syncCategoryAssignments(em, record, after.categoryIds),
-          () => syncProductTags(em, record, after.tags),
-        ],
+        phases,
         { transaction: true },
       );
     } catch (error) {
@@ -1635,12 +1856,24 @@ const createProductCommand: CommandHandler<
         values: after.custom,
       });
     }
+    if (restoredPrices.length) {
+      const { finalizeCatalogPriceCreation } = await import("./prices");
+      for (const restoredPrice of restoredPrices) {
+        await finalizeCatalogPriceCreation(
+          { record: restoredPrice, custom: {} },
+          ctx,
+        );
+      }
+    }
     await emitProductCrudChange({
       dataEngine,
       action: "created",
       product: record,
     });
-    return { productId: record.id };
+    return {
+      productId: record.id,
+      basePriceApplied: restoredPrices.length > 0,
+    };
   },
 };
 
@@ -1795,6 +2028,8 @@ const updateProductCommand: CommandHandler<
     }
     if (parsed.productType !== undefined)
       record.productType = parsed.productType;
+    if (parsed.lifecycleState !== undefined)
+      record.lifecycleState = parsed.lifecycleState;
     if (parsed.statusEntryId !== undefined)
       record.statusEntryId = parsed.statusEntryId ?? null;
     if (parsed.primaryCurrencyCode !== undefined) {
@@ -2048,6 +2283,7 @@ const updateProductCommand: CommandHandler<
         "title",
         "sku",
         "productType",
+        "lifecycleState",
         "defaultUnit",
         "defaultSalesUnit",
         "defaultSalesUnitQuantity",
@@ -2132,6 +2368,7 @@ const updateProductCommand: CommandHandler<
           ? em.getReference(CatalogOptionSchemaTemplate, before.optionSchemaId)
           : null,
         productType: before.productType ?? "simple",
+        lifecycleState: before.lifecycleState ?? "active",
         isConfigurable: before.isConfigurable,
         isActive: before.isActive,
         createdAt: new Date(before.createdAt),
@@ -2323,6 +2560,7 @@ const deleteProductCommand: CommandHandler<
           ? em.getReference(CatalogOptionSchemaTemplate, before.optionSchemaId)
           : null,
         productType: before.productType ?? "simple",
+        lifecycleState: before.lifecycleState ?? "active",
         isConfigurable: before.isConfigurable,
         isActive: before.isActive,
         createdAt: new Date(before.createdAt),

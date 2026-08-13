@@ -1,5 +1,5 @@
 import { registerCommand } from '@open-mercato/shared/lib/commands'
-import type { CommandHandler } from '@open-mercato/shared/lib/commands'
+import type { CommandHandler, CommandRuntimeContext } from '@open-mercato/shared/lib/commands'
 import { buildChanges, requireId, parseWithCustomFields, setCustomFieldsIfAny, emitCrudSideEffects } from '@open-mercato/shared/lib/commands/helpers'
 import type { EntityManager } from '@mikro-orm/postgresql'
 import { CrudHttpError } from '@open-mercato/shared/lib/crud/errors'
@@ -290,134 +290,188 @@ function numericStringToNumber(value: string | null | undefined): number | null 
   return Number.isFinite(numeric) ? numeric : null
 }
 
+type CatalogPriceCreation = {
+  record: CatalogProductPrice
+  custom: Record<string, unknown>
+}
+
+export async function createCatalogPriceRecord(
+  rawInput: unknown,
+  ctx: CommandRuntimeContext,
+  options: {
+    em: EntityManager
+    product?: CatalogProduct
+    priceKind?: CatalogPriceKind
+  },
+): Promise<CatalogPriceCreation> {
+  const { parsed, custom } = parseWithCustomFields(priceCreateSchema, rawInput)
+  const { em } = options
+  const actorScope = commandActorScope(ctx)
+  let variant: CatalogProductVariant | null = null
+  let product: CatalogProduct | null = options.product ?? null
+  if (parsed.variantId) {
+    variant = await requireVariant(em, parsed.variantId, actorScope)
+    const variantProduct =
+      typeof variant.product === 'string'
+        ? await requireProduct(em, variant.product, {
+            tenantId: variant.tenantId,
+            organizationId: variant.organizationId,
+          })
+        : variant.product
+    if (product && variantProduct.id !== product.id) {
+      throw new CrudHttpError(400, { error: 'Variant does not belong to the provided product.' })
+    }
+    product = variantProduct
+  }
+  if (parsed.productId) {
+    const explicitProduct =
+      options.product && options.product.id === parsed.productId
+        ? options.product
+        : await requireProduct(em, parsed.productId, actorScope)
+    if (product && explicitProduct.id !== product.id) {
+      throw new CrudHttpError(400, { error: 'Variant does not belong to the provided product.' })
+    }
+    product = explicitProduct
+  }
+  const scopeSource = variant ?? product
+  if (!scopeSource) {
+    throw new CrudHttpError(400, { error: 'Provide either a variantId or productId for pricing.' })
+  }
+  ensureTenantScope(ctx, scopeSource.tenantId)
+  ensureOrganizationScope(ctx, scopeSource.organizationId)
+  const scopeSourceScope = {
+    tenantId: scopeSource.tenantId,
+    organizationId: scopeSource.organizationId,
+  }
+
+  const priceKind =
+    options.priceKind && options.priceKind.id === parsed.priceKindId
+      ? options.priceKind
+      : await requirePriceKind(em, parsed.priceKindId, scopeSourceScope)
+  ensureSameTenant(priceKind, scopeSource.tenantId)
+
+  let offer: CatalogOffer | null = null
+  if (parsed.offerId) {
+    offer = await requireOffer(em, parsed.offerId, scopeSourceScope)
+    ensureSameScope(offer, scopeSource.organizationId, scopeSource.tenantId)
+    const offerProduct =
+      typeof offer.product === 'string'
+        ? await requireProduct(em, offer.product, {
+            tenantId: offer.tenantId,
+            organizationId: offer.organizationId,
+          })
+        : offer.product
+    if (product && offerProduct.id !== product.id) {
+      throw new CrudHttpError(400, { error: 'Offer does not belong to the selected product.' })
+    }
+    product = offerProduct
+  }
+  const channelId = parsed.channelId ?? (offer ? offer.channelId : null)
+  const taxCalculationService = ctx.container.resolve<TaxCalculationService>('taxCalculationService')
+  const amountInput = resolveAmountInputFromParsed(parsed)
+  let unitPriceNetValue = toNumericString(parsed.unitPriceNet)
+  let unitPriceGrossValue = toNumericString(parsed.unitPriceGross)
+  let taxRateValue = toNumericString(parsed.taxRate)
+  let taxAmountValue: string | null = null
+  if (amountInput) {
+    const calculation = await taxCalculationService.calculateUnitAmounts({
+      amount: amountInput.amount,
+      mode: amountInput.mode,
+      organizationId: scopeSource.organizationId,
+      tenantId: scopeSource.tenantId,
+      taxRateId: parsed.taxRateId ?? null,
+      taxRate: parsed.taxRate ?? null,
+    })
+    unitPriceNetValue = toNumericString(calculation.netAmount)
+    unitPriceGrossValue = toNumericString(calculation.grossAmount)
+    taxAmountValue = toNumericString(calculation.taxAmount)
+    taxRateValue = toNumericString(calculation.taxRate)
+  }
+
+  const now = new Date()
+  const record = em.create(CatalogProductPrice, {
+    organizationId: scopeSource.organizationId,
+    tenantId: scopeSource.tenantId,
+    variant,
+    product: product ?? null,
+    offer: offer ?? null,
+    priceKind,
+    currencyCode: parsed.currencyCode,
+    kind: priceKind.code,
+    minQuantity: parsed.minQuantity ?? 1,
+    maxQuantity: parsed.maxQuantity ?? null,
+    unitPriceNet: unitPriceNetValue,
+    unitPriceGross: unitPriceGrossValue,
+    taxRate: taxRateValue,
+    taxAmount: taxAmountValue,
+    channelId,
+    userId: parsed.userId ?? null,
+    userGroupId: parsed.userGroupId ?? null,
+    customerId: parsed.customerId ?? null,
+    customerGroupId: parsed.customerGroupId ?? null,
+    metadata: parsed.metadata ? cloneJson(parsed.metadata) : null,
+    startsAt: parsed.startsAt ?? null,
+    endsAt: parsed.endsAt ?? null,
+    createdAt: now,
+    updatedAt: now,
+  })
+  em.persist(record)
+  return { record, custom }
+}
+
+export async function finalizeCatalogPriceCreation(
+  creation: CatalogPriceCreation,
+  ctx: CommandRuntimeContext,
+): Promise<void> {
+  const { record, custom } = creation
+  const dataEngine = ctx.container.resolve('dataEngine') as DataEngine
+  await setCustomFieldsIfAny({
+    dataEngine,
+    entityId: E.catalog.catalog_product_price,
+    recordId: record.id,
+    organizationId: record.organizationId,
+    tenantId: record.tenantId,
+    values: custom,
+  })
+  await emitCrudSideEffects({
+    dataEngine,
+    action: 'created',
+    entity: record,
+    identifiers: {
+      id: record.id,
+      organizationId: record.organizationId,
+      tenantId: record.tenantId,
+    },
+    events: priceCrudEvents,
+  })
+}
+
+export async function emitCatalogPriceDeletionSideEffects(
+  record: CatalogProductPrice,
+  ctx: CommandRuntimeContext,
+): Promise<void> {
+  const dataEngine = ctx.container.resolve('dataEngine') as DataEngine
+  await emitCrudSideEffects({
+    dataEngine,
+    action: 'deleted',
+    entity: record,
+    identifiers: {
+      id: record.id,
+      organizationId: record.organizationId,
+      tenantId: record.tenantId,
+    },
+    events: priceCrudEvents,
+  })
+}
+
 const createPriceCommand: CommandHandler<PriceCreateInput, { priceId: string }> = {
   id: 'catalog.prices.create',
   async execute(rawInput, ctx) {
-    const { parsed, custom } = parseWithCustomFields(priceCreateSchema, rawInput)
     const em = (ctx.container.resolve('em') as EntityManager).fork()
-    const actorScope = commandActorScope(ctx)
-    let variant: CatalogProductVariant | null = null
-    let product: CatalogProduct | null = null
-    if (parsed.variantId) {
-      variant = await requireVariant(em, parsed.variantId, actorScope)
-      product =
-        typeof variant.product === 'string'
-          ? await requireProduct(em, variant.product, {
-              tenantId: variant.tenantId,
-              organizationId: variant.organizationId,
-            })
-          : variant.product
-    }
-    if (parsed.productId) {
-      const explicitProduct = await requireProduct(em, parsed.productId, actorScope)
-      if (product && explicitProduct.id !== product.id) {
-        throw new CrudHttpError(400, { error: 'Variant does not belong to the provided product.' })
-      }
-      product = explicitProduct
-    }
-    if (!variant && !product) {
-      throw new CrudHttpError(400, { error: 'Provide either a variantId or productId for pricing.' })
-    }
-    const scopeSource = variant ?? product!
-    ensureTenantScope(ctx, scopeSource.tenantId)
-    ensureOrganizationScope(ctx, scopeSource.organizationId)
-    const scopeSourceScope = {
-      tenantId: scopeSource.tenantId,
-      organizationId: scopeSource.organizationId,
-    }
-
-    const priceKind = await requirePriceKind(em, parsed.priceKindId, scopeSourceScope)
-    ensureSameTenant(priceKind, scopeSource.tenantId)
-
-    let offer: CatalogOffer | null = null
-    if (parsed.offerId) {
-      offer = await requireOffer(em, parsed.offerId, scopeSourceScope)
-      ensureSameScope(offer, scopeSource.organizationId, scopeSource.tenantId)
-      const offerProduct =
-        typeof offer.product === 'string'
-          ? await requireProduct(em, offer.product, {
-              tenantId: offer.tenantId,
-              organizationId: offer.organizationId,
-            })
-          : offer.product
-      if (product && offerProduct.id !== product.id) {
-        throw new CrudHttpError(400, { error: 'Offer does not belong to the selected product.' })
-      }
-      product = offerProduct
-    }
-    const productEntity = product
-    const channelId = parsed.channelId ?? (offer ? offer.channelId : null)
-    const taxCalculationService = ctx.container.resolve<TaxCalculationService>('taxCalculationService')
-    const amountInput = resolveAmountInputFromParsed(parsed)
-    let unitPriceNetValue = toNumericString(parsed.unitPriceNet)
-    let unitPriceGrossValue = toNumericString(parsed.unitPriceGross)
-    let taxRateValue = toNumericString(parsed.taxRate)
-    let taxAmountValue: string | null = null
-    if (amountInput) {
-      const calculation = await taxCalculationService.calculateUnitAmounts({
-        amount: amountInput.amount,
-        mode: amountInput.mode,
-        organizationId: scopeSource.organizationId,
-        tenantId: scopeSource.tenantId,
-        taxRateId: parsed.taxRateId ?? null,
-        taxRate: parsed.taxRate ?? null,
-      })
-      unitPriceNetValue = toNumericString(calculation.netAmount)
-      unitPriceGrossValue = toNumericString(calculation.grossAmount)
-      taxAmountValue = toNumericString(calculation.taxAmount)
-      taxRateValue = toNumericString(calculation.taxRate)
-    }
-
-    const now = new Date()
-    const record = em.create(CatalogProductPrice, {
-      organizationId: scopeSource.organizationId,
-      tenantId: scopeSource.tenantId,
-      variant,
-      product: productEntity ?? undefined,
-      offer: offer ?? undefined,
-      priceKind,
-      currencyCode: parsed.currencyCode,
-      kind: priceKind.code,
-      minQuantity: parsed.minQuantity ?? 1,
-      maxQuantity: parsed.maxQuantity ?? null,
-      unitPriceNet: unitPriceNetValue,
-      unitPriceGross: unitPriceGrossValue,
-      taxRate: taxRateValue,
-      taxAmount: taxAmountValue,
-      channelId,
-      userId: parsed.userId ?? null,
-      userGroupId: parsed.userGroupId ?? null,
-      customerId: parsed.customerId ?? null,
-      customerGroupId: parsed.customerGroupId ?? null,
-      metadata: parsed.metadata ? cloneJson(parsed.metadata) : null,
-      startsAt: parsed.startsAt ?? null,
-      endsAt: parsed.endsAt ?? null,
-      createdAt: now,
-      updatedAt: now,
-    })
-    em.persist(record)
+    const creation = await createCatalogPriceRecord(rawInput, ctx, { em })
     await em.flush()
-    await setCustomFieldsIfAny({
-      dataEngine: ctx.container.resolve('dataEngine'),
-      entityId: E.catalog.catalog_product_price,
-      recordId: record.id,
-      organizationId: record.organizationId,
-      tenantId: record.tenantId,
-      values: custom,
-    })
-    const de = ctx.container.resolve('dataEngine') as DataEngine
-    await emitCrudSideEffects({
-      dataEngine: de,
-      action: 'created',
-      entity: record,
-      identifiers: {
-        id: record.id,
-        organizationId: record.organizationId,
-        tenantId: record.tenantId,
-      },
-      events: priceCrudEvents,
-    })
-    return { priceId: record.id }
+    await finalizeCatalogPriceCreation(creation, ctx)
+    return { priceId: creation.record.id }
   },
   captureAfter: async (_input, result, ctx) => {
     const em = (ctx.container.resolve('em') as EntityManager).fork()

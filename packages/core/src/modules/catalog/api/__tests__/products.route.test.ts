@@ -1,3 +1,48 @@
+type CapturedCrudOptions = {
+  hooks?: {
+    afterList?: (
+      payload: { items?: Array<Record<string, unknown>> },
+      ctx: Record<string, unknown>,
+    ) => Promise<void>
+  }
+  actions?: {
+    create?: {
+      mapInput?: (args: {
+        raw: unknown
+        parsed: unknown
+        ctx: Record<string, unknown>
+      }) => Promise<unknown>
+      response?: (args: {
+        result: Record<string, unknown>
+        logEntry: null
+        ctx: Record<string, unknown>
+      }) => unknown
+    }
+  }
+}
+
+let mockCrudOptions: CapturedCrudOptions | null = null
+
+const mockMakeCrudRoute = jest.fn((options: CapturedCrudOptions) => {
+  mockCrudOptions = options
+  return {
+    GET: jest.fn(),
+    POST: jest.fn(),
+    PUT: jest.fn(),
+    DELETE: jest.fn(),
+  }
+})
+
+const mockFindWithDecryption = jest.fn()
+
+jest.mock('@open-mercato/shared/lib/crud/factory', () => ({
+  makeCrudRoute: (options: CapturedCrudOptions) => mockMakeCrudRoute(options),
+}))
+
+jest.mock('@open-mercato/shared/lib/encryption/find', () => ({
+  findWithDecryption: (...args: unknown[]) => mockFindWithDecryption(...args),
+}))
+
 import {
   parseIdList,
   buildProductFilters,
@@ -20,6 +65,11 @@ jest.mock('@open-mercato/shared/lib/i18n/server', () => ({
 
 describe('catalog products route helpers', () => {
   beforeEach(() => {
+    mockFindWithDecryption.mockReset()
+    mockFindWithDecryption.mockImplementation(
+      (em: { find: (...args: unknown[]) => unknown }, ...args: unknown[]) =>
+        em.find(...args),
+    )
     ;(buildCustomFieldFiltersFromQuery as jest.Mock).mockResolvedValue({ custom: { $eq: 'value' } })
   })
 
@@ -84,6 +134,122 @@ describe('catalog products route helpers', () => {
     expect(filters.is_configurable).toBe(false)
     expect(filters.id).toEqual({ $in: ['prod-1', 'prod-2'] })
     expect((filters as any).custom).toEqual({ $eq: 'value' })
+  })
+
+  it('maps lifecycleState to the lifecycle_state equality filter', async () => {
+    const em = { fork: () => ({ find: jest.fn() }) }
+    const container = { resolve: jest.fn().mockReturnValue(em) }
+    ;(buildCustomFieldFiltersFromQuery as jest.Mock).mockResolvedValueOnce({})
+
+    const filters = await buildProductFilters(
+      { lifecycleState: 'draft' } as never,
+      { container, auth: { tenantId: 'tenant-1' } } as never,
+    )
+
+    expect(filters.lifecycle_state).toEqual({ $eq: 'draft' })
+  })
+
+  it('adds grouped non-deleted variant counts to every listed product', async () => {
+    const whereCalls: unknown[][] = []
+    const countQuery = {
+      select: jest.fn().mockReturnThis(),
+      where: jest.fn((...args: unknown[]) => {
+        whereCalls.push(args)
+        return countQuery
+      }),
+      groupBy: jest.fn().mockReturnThis(),
+      execute: jest.fn().mockResolvedValue([
+        { product_id: 'product-1', count: '2' },
+        { product_id: 'product-2', count: 1 },
+      ]),
+    }
+    const database = {
+      selectFrom: jest.fn().mockReturnValue(countQuery),
+    }
+    const forkedEm = {
+      getKysely: jest.fn().mockReturnValue(database),
+    }
+    const pricingService = {
+      resolvePriceMany: jest.fn().mockResolvedValue([null, null, null]),
+    }
+    const container = {
+      resolve: jest.fn((token: string) => {
+        if (token === 'em') return { fork: () => forkedEm }
+        if (token === 'catalogPricingService') return pricingService
+        throw new Error(`Unexpected dependency: ${token}`)
+      }),
+    }
+    mockFindWithDecryption.mockResolvedValue([])
+    const items: Array<Record<string, unknown>> = [
+      { id: 'product-1', title: 'One', sku: 'ONE' },
+      { id: 'product-2', title: 'Two', sku: 'TWO' },
+      { id: 'product-3', title: 'Three', sku: 'THREE' },
+    ]
+    const afterList = mockCrudOptions?.hooks?.afterList
+
+    expect(afterList).toBeDefined()
+    await afterList?.(
+      { items },
+      {
+        container,
+        auth: { tenantId: 'tenant-1', orgId: 'org-1' },
+        selectedOrganizationId: 'org-1',
+        query: {},
+      },
+    )
+
+    expect(database.selectFrom).toHaveBeenCalledWith('catalog_product_variants')
+    expect(whereCalls).toEqual(expect.arrayContaining([
+      ['product_id', 'in', ['product-1', 'product-2', 'product-3']],
+      ['deleted_at', 'is', null],
+      ['organization_id', '=', 'org-1'],
+      ['tenant_id', '=', 'tenant-1'],
+    ]))
+    expect(countQuery.groupBy).toHaveBeenCalledWith('product_id')
+    expect(items.map((item) => item.variants_count)).toEqual([2, 1, 0])
+  })
+
+  it('passes basePriceApplied through the create action response', () => {
+    const response = mockCrudOptions?.actions?.create?.response?.({
+      result: {
+        productId: '11111111-1111-4111-8111-111111111111',
+        basePriceApplied: true,
+      },
+      logEntry: null,
+      ctx: {},
+    })
+
+    expect(response).toEqual({
+      id: '11111111-1111-4111-8111-111111111111',
+      basePriceApplied: true,
+    })
+  })
+
+  it('rejects basePrice before command execution without catalog.pricing.manage', async () => {
+    const userHasAllFeatures = jest.fn().mockResolvedValue(false)
+    const container = {
+      resolve: jest.fn((token: string) => {
+        if (token === 'rbacService') return { userHasAllFeatures }
+        throw new Error(`Unexpected dependency: ${token}`)
+      }),
+    }
+    const mapInput = mockCrudOptions?.actions?.create?.mapInput
+
+    expect(mapInput).toBeDefined()
+    await expect(mapInput?.({
+      raw: { title: 'Restricted product', basePrice: { unitPriceNet: '12.00' } },
+      parsed: {},
+      ctx: {
+        container,
+        auth: { sub: 'user-1', tenantId: 'tenant-1', orgId: 'org-1' },
+        selectedOrganizationId: 'org-1',
+      },
+    })).rejects.toMatchObject({ status: 403 })
+    expect(userHasAllFeatures).toHaveBeenCalledWith(
+      'user-1',
+      ['catalog.pricing.manage'],
+      { tenantId: 'tenant-1', organizationId: 'org-1' },
+    )
   })
 
   it('dispatches independent filter prequeries concurrently and intersects them (issue #3179)', async () => {

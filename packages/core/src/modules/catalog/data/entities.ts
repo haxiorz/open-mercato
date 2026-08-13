@@ -1,10 +1,11 @@
 import { Collection, OptionalProps } from '@mikro-orm/core'
-import { Entity, Index, ManyToOne, OneToMany, PrimaryKey, Property, Unique } from '@mikro-orm/decorators/legacy'
+import { Check, Entity, Index, ManyToOne, OneToMany, PrimaryKey, Property, Unique } from '@mikro-orm/decorators/legacy'
 import type {
   CatalogExciseCategory,
   CatalogGtinType,
   CatalogHazmatPackingGroup,
   CatalogPriceDisplayMode,
+  CatalogProductLifecycleState,
   CatalogProductOptionSchema,
   CatalogProductRelationType,
   CatalogProductType,
@@ -62,8 +63,13 @@ export class CatalogOptionSchemaTemplate {
 
 @Entity({ tableName: 'catalog_products' })
 @Index({ name: 'catalog_products_org_tenant_idx', properties: ['organizationId', 'tenantId'] })
+@Index({ name: 'catalog_products_lifecycle_scope_idx', properties: ['organizationId', 'tenantId', 'lifecycleState'] })
 @Unique({ name: 'catalog_products_sku_scope_unique', properties: ['organizationId', 'tenantId', 'sku'] })
 @Unique({ name: 'catalog_products_handle_scope_unique', properties: ['organizationId', 'tenantId', 'handle'] })
+@Check({
+  name: 'catalog_products_lifecycle_state_check',
+  expression: `"lifecycle_state" in ('draft', 'active', 'archived')`,
+})
 export class CatalogProduct {
   [OptionalProps]?:
     | 'createdAt'
@@ -78,6 +84,7 @@ export class CatalogProduct {
     | 'containsLithiumBattery'
     | 'requiresShipping'
     | 'isQuoteOnly'
+    | 'lifecycleState'
 
   @PrimaryKey({ type: 'uuid', defaultRaw: 'gen_random_uuid()' })
   id!: string
@@ -111,6 +118,9 @@ export class CatalogProduct {
 
   @Property({ name: 'product_type', type: 'text', default: 'simple' })
   productType: CatalogProductType = 'simple'
+
+  @Property({ name: 'lifecycle_state', type: 'text', default: 'active' })
+  lifecycleState: CatalogProductLifecycleState = 'active'
 
   @Property({ name: 'status_entry_id', type: 'uuid', nullable: true })
   statusEntryId?: string | null

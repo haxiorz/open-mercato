@@ -964,6 +964,7 @@
   "wms.backend.sku.quickActions.title": "빠른 작업",
   "wms.backend.warehouses.nav.title": "창고",
   "wms.backend.zones.nav.title": "구역",
+  "wms.catalogStock.column": "재고",
   "wms.common.active": "활동적인",
   "wms.common.inactive": "비활성",
   "wms.errors.forbidden": "금지됨",

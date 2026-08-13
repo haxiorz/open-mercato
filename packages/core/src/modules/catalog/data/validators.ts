@@ -5,6 +5,7 @@ import {
   CATALOG_GTU_CODES,
   CATALOG_HAZMAT_PACKING_GROUPS,
   CATALOG_PRICE_DISPLAY_MODES,
+  CATALOG_PRODUCT_LIFECYCLE_STATES,
   CATALOG_PRODUCT_TYPES,
 } from './types'
 import { isValidGtin, normalizeGtinValue } from '../lib/gtin'
@@ -140,6 +141,12 @@ const catalogPriceAmountSchema = z
     return result.numeric
   })
 
+const productBasePriceSchema = z.object({
+  unitPriceNet: catalogPriceAmountSchema,
+  currencyCode: currencyCodeSchema,
+  taxRate: z.coerce.number().min(0).max(100).optional(),
+})
+
 function productUomCrossFieldRefinement(
   input: {
     defaultUnit?: string | null
@@ -193,6 +200,7 @@ const productBaseSchema = scoped.extend({
   taxRateId: uuid().nullable().optional(),
   taxRate: z.coerce.number().min(0).max(100).optional().nullable(),
   productType: productTypeSchema.default('simple'),
+  lifecycleState: z.enum(CATALOG_PRODUCT_LIFECYCLE_STATES).optional(),
   statusEntryId: uuid().optional(),
   primaryCurrencyCode: currencyCodeSchema.optional(),
   defaultUnit: z.string().trim().max(50).optional().nullable(),
@@ -325,6 +333,9 @@ const productComplianceCrossFieldRefinement = (
 }
 
 export const productCreateSchema = productBaseSchema
+  .extend({
+    basePrice: productBasePriceSchema.optional(),
+  })
   .superRefine(productUomCrossFieldRefinement)
   .superRefine(productComplianceCrossFieldRefinement)
 

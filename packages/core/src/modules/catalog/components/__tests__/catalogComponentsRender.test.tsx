@@ -182,6 +182,43 @@ jest.mock('@open-mercato/shared/lib/frontend/useOrganizationScope', () => ({
   useOrganizationScopeVersion: () => 1,
 }))
 
+jest.mock('next/navigation', () => ({
+  useRouter: () => ({ push: jest.fn(), replace: jest.fn(), prefetch: jest.fn() }),
+}))
+
+jest.mock('@open-mercato/ui/backend/conflicts', () => ({
+  surfaceRecordConflict: jest.fn(() => false),
+}))
+
+jest.mock('@open-mercato/ui/backend/utils/useCurrentUserId', () => ({
+  useCurrentUserId: () => 'user-1',
+}))
+
+jest.mock('../products/useCatalogProductStats', () => ({
+  useCatalogProductStats: () => ({
+    stats: { totals: { all: 1, active: 1, draft: 0, archived: 0 }, productsInActiveOffers: 0 },
+    isLoading: false,
+    error: null,
+    reload: jest.fn(),
+  }),
+}))
+
+jest.mock('../products/ProductsHero', () => ({
+  ProductsHero: ({ actions }: any) => <div data-testid="products-hero-mock">{actions}</div>,
+}))
+
+jest.mock('../products/ProductsGridView', () => ({
+  ProductsGridView: () => <div data-testid="products-grid-mock" />,
+}))
+
+jest.mock('../products/ProductQuickCreateDialog', () => ({
+  ProductQuickCreateDialog: () => null,
+}))
+
+jest.mock('../products/ProductsToolbar', () => ({
+  ProductsToolbar: () => <div data-testid="products-toolbar-mock" />,
+}))
+
 jest.mock('@open-mercato/core/modules/attachments/lib/imageUrls', () => ({
   buildAttachmentImageUrl: (id: string) => `https://cdn.local/${id}.jpg`,
   slugifyAttachmentFileName: (name: string) => name,

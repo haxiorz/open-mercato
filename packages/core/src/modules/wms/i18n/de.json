@@ -964,6 +964,7 @@
   "wms.backend.sku.quickActions.title": "Schnellaktionen",
   "wms.backend.warehouses.nav.title": "Lager",
   "wms.backend.zones.nav.title": "Zonen",
+  "wms.catalogStock.column": "Bestand",
   "wms.common.active": "Aktiv",
   "wms.common.inactive": "Inaktiv",
   "wms.errors.forbidden": "Zugriff verweigert",

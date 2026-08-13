@@ -964,6 +964,7 @@
   "wms.backend.sku.quickActions.title": "Szybkie akcje",
   "wms.backend.warehouses.nav.title": "Magazyny",
   "wms.backend.zones.nav.title": "Strefy",
+  "wms.catalogStock.column": "Stan",
   "wms.common.active": "Aktywny",
   "wms.common.inactive": "Nieaktywny",
   "wms.errors.forbidden": "Brak dostępu",

@@ -5,9 +5,15 @@ export const CATALOG_PRODUCT_TYPES = [
   'downloadable',
   'bundle',
   'grouped',
+  'service',
+  'subscription',
 ] as const
 
 export type CatalogProductType = (typeof CATALOG_PRODUCT_TYPES)[number]
+
+export const CATALOG_PRODUCT_LIFECYCLE_STATES = ['draft', 'active', 'archived'] as const
+
+export type CatalogProductLifecycleState = (typeof CATALOG_PRODUCT_LIFECYCLE_STATES)[number]
 
 export const CATALOG_CONFIGURABLE_PRODUCT_TYPES = ['configurable', 'virtual', 'downloadable'] as const
 
