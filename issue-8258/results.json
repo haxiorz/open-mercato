@@ -1,0 +1,11 @@
+{
+  "status": "passed",
+  "browser": "156.0.8078.80",
+  "outcomes": [
+    "Default options unchanged; untagged, unknown and metadata-tagged code blocks render; initialization emits no change.",
+    "Custom Rust addition, JavaScript rename and SQL removal displayed; selecting Rust emits fenced rust markdown; existing tags and metadata preserved.",
+    "Dynamic option and Polish locale updates retain unsaved content and editor DOM identity, update labels, and emit no markdown changes."
+  ],
+  "errors": [],
+  "scope": "Real isolated component; no full-app or persistence QA"
+}
