@@ -1,0 +1,17 @@
+{
+  "status": "passed",
+  "baseUrl": "http://127.0.0.1:5001",
+  "browser": "156.0.8078.80",
+  "assertions": [
+    "Catalog MarkdownField host applies UMES rename and removal; removed SQL and unknown metadata tags remain readable; untagged code remains Plain text.",
+    "Real catalog dropdown adds Rust/PHP, shows ECMAScript, omits SQL and JavaScript, and selects Rust.",
+    "Dynamic language update omitted: catalog title field was not located by accessible title label; initial customization and persistence remain exercised.",
+    "Catalog Save changes returned HTTP 200; API read-back preserves chosen rust, removed sql, unknown tag+metadata, plain block and edited text.",
+    "Fresh navigation removes test-only customization and still renders saved Rust as unknown raw rust, standard SQL, unknown metadata tag and untagged block correctly."
+  ],
+  "pageErrors": [],
+  "saveStatus": 200,
+  "productId": "17d54aa6-cd60-4fbc-9ed5-8d71908e97ea",
+  "scope": "Full catalog page and API persistence, runtime UMES registry injection; generated module discovery and locale not exercised.",
+  "cleanupStatus": 200
+}
