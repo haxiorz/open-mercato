@@ -1,0 +1,202 @@
+{
+  "stats": {
+    "startTime": "2026-11-04T05:18:10.754Z",
+    "duration": 480274.367,
+    "expected": 13,
+    "skipped": 0,
+    "unexpected": 5,
+    "flaky": 0
+  },
+  "geometry": [
+    {
+      "case": "companies empty at 390px",
+      "testStatus": "passed",
+      "viewport": 390,
+      "documentWidth": 390,
+      "dateViewport": 232,
+      "dateContent": 524,
+      "scrollLeft": 0,
+      "domContentLoadedMs": null
+    },
+    {
+      "case": "companies empty at 1440px",
+      "testStatus": "timedOut",
+      "viewport": 1440,
+      "documentWidth": 1440,
+      "dateViewport": 956,
+      "dateContent": 956,
+      "scrollLeft": 0,
+      "domContentLoadedMs": null
+    },
+    {
+      "case": "companies populated at 390px",
+      "testStatus": "timedOut",
+      "viewport": 390,
+      "documentWidth": 390,
+      "dateViewport": 232,
+      "dateContent": 524,
+      "scrollLeft": 0,
+      "domContentLoadedMs": null
+    },
+    {
+      "case": "companies populated at 1440px",
+      "testStatus": "passed",
+      "viewport": 1440,
+      "documentWidth": 1440,
+      "dateViewport": 956,
+      "dateContent": 956,
+      "scrollLeft": 0,
+      "domContentLoadedMs": null
+    },
+    {
+      "case": "people empty at 390px",
+      "testStatus": "timedOut",
+      "viewport": 390,
+      "documentWidth": 390,
+      "dateViewport": 232,
+      "dateContent": 524,
+      "scrollLeft": 0,
+      "domContentLoadedMs": null
+    },
+    {
+      "case": "people empty at 1440px",
+      "testStatus": "passed",
+      "viewport": 1440,
+      "documentWidth": 1440,
+      "dateViewport": 956,
+      "dateContent": 956,
+      "scrollLeft": 0,
+      "domContentLoadedMs": null
+    },
+    {
+      "case": "people populated at 390px",
+      "testStatus": "passed",
+      "viewport": 390,
+      "documentWidth": 390,
+      "dateViewport": 232,
+      "dateContent": 524,
+      "scrollLeft": 0,
+      "domContentLoadedMs": null
+    },
+    {
+      "case": "people populated at 1440px",
+      "testStatus": "passed",
+      "viewport": 1440,
+      "documentWidth": 1440,
+      "dateViewport": 956,
+      "dateContent": 956,
+      "scrollLeft": 0,
+      "domContentLoadedMs": null
+    }
+  ],
+  "cases": [
+    {
+      "group": "packages/core/src/modules/customers/__integration__/TC-CRM-8603.spec.ts",
+      "test": "TC-CRM-8603 companies preserves completed activity local date when editing or canceling",
+      "status": "passed",
+      "durationMs": 12288
+    },
+    {
+      "group": "packages/core/src/modules/customers/__integration__/TC-CRM-8603.spec.ts",
+      "test": "TC-CRM-8603 people preserves completed activity local date when editing or canceling",
+      "status": "timedOut",
+      "durationMs": 21857
+    },
+    {
+      "group": "companies empty at 390px",
+      "test": "TC-CRM-8603 keeps calendar controls reachable by pointer",
+      "status": "passed",
+      "durationMs": 19293
+    },
+    {
+      "group": "companies empty at 390px",
+      "test": "TC-CRM-8603 keeps calendar controls reachable by keyboard",
+      "status": "passed",
+      "durationMs": 7769
+    },
+    {
+      "group": "companies empty at 1440px",
+      "test": "TC-CRM-8603 keeps calendar controls reachable by pointer",
+      "status": "timedOut",
+      "durationMs": 30491
+    },
+    {
+      "group": "companies empty at 1440px",
+      "test": "TC-CRM-8603 keeps calendar controls reachable by keyboard",
+      "status": "passed",
+      "durationMs": 6474
+    },
+    {
+      "group": "companies populated at 390px",
+      "test": "TC-CRM-8603 keeps calendar controls reachable by pointer",
+      "status": "timedOut",
+      "durationMs": 20999
+    },
+    {
+      "group": "companies populated at 390px",
+      "test": "TC-CRM-8603 keeps calendar controls reachable by keyboard",
+      "status": "timedOut",
+      "durationMs": 20572
+    },
+    {
+      "group": "companies populated at 1440px",
+      "test": "TC-CRM-8603 keeps calendar controls reachable by pointer",
+      "status": "passed",
+      "durationMs": 12054
+    },
+    {
+      "group": "companies populated at 1440px",
+      "test": "TC-CRM-8603 keeps calendar controls reachable by keyboard",
+      "status": "passed",
+      "durationMs": 5572
+    },
+    {
+      "group": "people empty at 390px",
+      "test": "TC-CRM-8603 keeps calendar controls reachable by pointer",
+      "status": "timedOut",
+      "durationMs": 23810
+    },
+    {
+      "group": "people empty at 390px",
+      "test": "TC-CRM-8603 keeps calendar controls reachable by keyboard",
+      "status": "passed",
+      "durationMs": 5171
+    },
+    {
+      "group": "people empty at 1440px",
+      "test": "TC-CRM-8603 keeps calendar controls reachable by pointer",
+      "status": "passed",
+      "durationMs": 10053
+    },
+    {
+      "group": "people empty at 1440px",
+      "test": "TC-CRM-8603 keeps calendar controls reachable by keyboard",
+      "status": "passed",
+      "durationMs": 5299
+    },
+    {
+      "group": "people populated at 390px",
+      "test": "TC-CRM-8603 keeps calendar controls reachable by pointer",
+      "status": "passed",
+      "durationMs": 15553
+    },
+    {
+      "group": "people populated at 390px",
+      "test": "TC-CRM-8603 keeps calendar controls reachable by keyboard",
+      "status": "passed",
+      "durationMs": 8912
+    },
+    {
+      "group": "people populated at 1440px",
+      "test": "TC-CRM-8603 keeps calendar controls reachable by pointer",
+      "status": "passed",
+      "durationMs": 14701
+    },
+    {
+      "group": "people populated at 1440px",
+      "test": "TC-CRM-8603 keeps calendar controls reachable by keyboard",
+      "status": "passed",
+      "durationMs": 4919
+    }
+  ]
+}
