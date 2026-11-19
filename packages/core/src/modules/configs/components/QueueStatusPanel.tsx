@@ -103,7 +103,7 @@ function FailedJobsTable({
               <td className="py-1 pr-3 font-mono text-xs">{job.id}</td>
               <td className="py-1 pr-3">{job.type ?? '—'}</td>
               <td className="py-1 pr-3">{job.workerId ?? '—'}</td>
-              <td className="py-1 pr-3 max-w-xs truncate" title={reason}>{reason}</td>
+              <td className="max-w-xs wrap-anywhere py-1 pr-3">{reason}</td>
               <td className="py-1 pr-3">{job.attemptsMade ?? '—'}</td>
               <td className="py-1 pr-3">{formatTimestamp(job.failedAt)}</td>
             </>
@@ -203,8 +203,12 @@ function QueueCard({
   canInspectPayloads: boolean
   onInspect: (queue: string, jobId: string) => void
 }) {
+  const failedJobsHeadingId = React.useId()
+  const processingStats = entry.processingStats
+  const localTimingsUnavailable = entry.strategy === 'local' && (!processingStats || processingStats.sampleSize === 0)
+
   return (
-    <article className="flex flex-col gap-4 rounded-lg border bg-card p-4">
+    <article className="@container flex min-w-0 flex-col gap-4 rounded-lg border bg-card p-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="space-y-1">
           <h3 className="text-base font-semibold">{entry.queue}</h3>
@@ -231,7 +235,7 @@ function QueueCard({
         />
       ) : (
         <>
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
+          <div className="grid grid-cols-2 gap-3 @sm:grid-cols-3 @xl:grid-cols-5">
             {([
               ['waiting', entry.counts.waiting, 'neutral'],
               ['active', entry.counts.active, 'info'],
@@ -240,40 +244,46 @@ function QueueCard({
               ...(entry.counts.delayed !== undefined ? [['delayed', entry.counts.delayed, 'neutral']] as const : []),
             ] as const).map(([key, value, variant]) => (
               <div key={key} className="flex flex-col items-start gap-1 rounded border bg-background p-2">
-                <StatusBadge variant={variant}>{t(`configs.queuesStatus.counts.${key}`, key)}</StatusBadge>
+                <StatusBadge variant={variant} className="max-w-full whitespace-normal wrap-anywhere">
+                  {t(`configs.queuesStatus.counts.${key}`, key)}
+                </StatusBadge>
                 <span className="text-lg font-semibold">{value}</span>
               </div>
             ))}
           </div>
 
-          {entry.processingStats ? (
+          {localTimingsUnavailable ? (
+            <p className="text-xs text-muted-foreground">
+              {t('configs.queuesStatus.processing.localUnavailable', 'Processing times are unavailable because the local queue does not retain completed jobs.')}
+            </p>
+          ) : processingStats ? (
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 text-sm">
               <div>
                 <dt className="text-xs uppercase tracking-wide text-muted-foreground">
                   {t('configs.queuesStatus.processing.last', 'Last')}
                 </dt>
-                <dd>{formatDurationMs(entry.processingStats.lastProcessingMs, t)}</dd>
+                <dd>{formatDurationMs(processingStats.lastProcessingMs, t)}</dd>
               </div>
               <div>
                 <dt className="text-xs uppercase tracking-wide text-muted-foreground">
                   {t('configs.queuesStatus.processing.avg', 'Average')}
                 </dt>
-                <dd>{formatDurationMs(entry.processingStats.avgProcessingMs, t)}</dd>
+                <dd>{formatDurationMs(processingStats.avgProcessingMs, t)}</dd>
               </div>
               <div>
                 <dt className="text-xs uppercase tracking-wide text-muted-foreground">
                   {t('configs.queuesStatus.processing.p95', 'p95')}
                 </dt>
-                <dd>{formatDurationMs(entry.processingStats.p95ProcessingMs, t)}</dd>
+                <dd>{formatDurationMs(processingStats.p95ProcessingMs, t)}</dd>
               </div>
               <div>
                 <dt className="text-xs uppercase tracking-wide text-muted-foreground">
                   {t('configs.queuesStatus.processing.avgWait', 'Avg wait')}
                 </dt>
-                <dd>{formatDurationMs(entry.processingStats.avgWaitMs, t)}</dd>
+                <dd>{formatDurationMs(processingStats.avgWaitMs, t)}</dd>
               </div>
               <p className="col-span-full text-xs text-muted-foreground">
-                {t('configs.queuesStatus.processing.sampleSize', 'Based on {{count}} recently completed jobs', { count: entry.processingStats.sampleSize })}
+                {t('configs.queuesStatus.processing.sampleSize', 'Based on {{count}} recently completed jobs', { count: processingStats.sampleSize })}
               </p>
             </div>
           ) : null}
@@ -319,17 +329,19 @@ function QueueCard({
           ) : null}
 
           <div className="space-y-1">
-            <h4 className="text-sm font-semibold">{t('configs.queuesStatus.failed.title', 'Recent failures')}</h4>
+            <h4 id={failedJobsHeadingId} className="text-sm font-semibold">{t('configs.queuesStatus.failed.title', 'Recent failures')}</h4>
             {entry.failedJobsUnavailable ? (
               <p className="text-xs text-muted-foreground">
                 {t('configs.queuesStatus.failed.unavailable', 'Failed-job details are unavailable for this strategy.')}
               </p>
             ) : entry.failedJobs && entry.failedJobs.length > 0 ? (
-              <FailedJobsTable
-                jobs={entry.failedJobs}
-                t={t}
-                onInspect={canInspectPayloads ? (jobId) => onInspect(entry.queue, jobId) : undefined}
-              />
+              <div className="overflow-x-auto" role="region" aria-labelledby={failedJobsHeadingId} tabIndex={0}>
+                <FailedJobsTable
+                  jobs={entry.failedJobs}
+                  t={t}
+                  onInspect={canInspectPayloads ? (jobId) => onInspect(entry.queue, jobId) : undefined}
+                />
+              </div>
             ) : (
               <p className="text-xs text-muted-foreground">
                 {t('configs.queuesStatus.failed.none', 'No recent failures.')}
@@ -388,8 +400,13 @@ export function QueueStatusPanel() {
 
   const handleApplyFilters = React.useCallback((event: React.FormEvent) => {
     event.preventDefault()
+    if (state.loading) return
     setAppliedFilters({ queue: queueFilter, type: typeFilter.trim() })
-  }, [queueFilter, typeFilter])
+  }, [queueFilter, state.loading, typeFilter])
+
+  const handleRefresh = () => {
+    if (!state.loading) void loadSnapshot(appliedFilters)
+  }
 
   const inspectorOpenerRef = React.useRef<HTMLElement | null>(null)
 
@@ -427,7 +444,7 @@ export function QueueStatusPanel() {
           <h2 className="text-lg font-semibold">{t('configs.queuesStatus.title', 'Queue status')}</h2>
         </header>
         <ErrorMessage label={state.error} />
-        <Button type="button" variant="outline" onClick={() => loadSnapshot(appliedFilters).catch(() => {})}>
+        <Button type="button" variant="outline" onClick={handleRefresh}>
           {t('configs.queuesStatus.retry', 'Retry')}
         </Button>
       </section>
@@ -446,8 +463,13 @@ export function QueueStatusPanel() {
         <p className="text-sm text-muted-foreground">
           {t('configs.queuesStatus.description', 'Job counts and failed-job visibility for every registered background queue.')}
         </p>
-        <p className="text-xs text-muted-foreground">
-          {t('configs.queuesStatus.generatedAt', 'Snapshot generated {{timestamp}}', { timestamp: new Date(snapshot.generatedAt).toLocaleString() })}
+        <p className="flex items-center gap-2 text-xs text-muted-foreground" role="status">
+          {state.loading ? (
+            <>
+              <span aria-hidden="true"><Spinner size="sm" /></span>
+              {t('configs.queuesStatus.refreshing', 'Refreshing queue status…')}
+            </>
+          ) : t('configs.queuesStatus.generatedAt', 'Snapshot generated {{timestamp}}', { timestamp: new Date(snapshot.generatedAt).toLocaleString() })}
         </p>
       </header>
 
@@ -480,8 +502,10 @@ export function QueueStatusPanel() {
             className="w-48"
           />
         </div>
-        <Button type="submit" variant="outline">{t('configs.queuesStatus.filter.apply', 'Apply')}</Button>
-        <Button type="button" variant="ghost" onClick={() => loadSnapshot(appliedFilters).catch(() => {})}>
+        <Button type="submit" variant="outline" aria-disabled={state.loading} className="aria-disabled:text-text-disabled">
+          {t('configs.queuesStatus.filter.apply', 'Apply')}
+        </Button>
+        <Button type="button" variant="ghost" aria-disabled={state.loading} className="aria-disabled:text-text-disabled" onClick={handleRefresh}>
           {t('configs.queuesStatus.refresh', 'Refresh')}
         </Button>
       </form>

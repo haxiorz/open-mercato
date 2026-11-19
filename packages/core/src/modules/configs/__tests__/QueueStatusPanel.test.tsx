@@ -96,6 +96,47 @@ describe('QueueStatusPanel', () => {
     expect(await screen.findByText('queue.handler_error')).toBeTruthy()
   })
 
+  it('explains unavailable local processing times without rendering an empty metrics grid', async () => {
+    mockApi(snapshot({ strategy: 'local', fidelity: 'partial', processingStats: { sampleSize: 0, fidelity: 'partial' } }))
+    render(<QueueStatusPanel />)
+
+    expect(await screen.findByText('Processing times are unavailable because the local queue does not retain completed jobs.')).toBeVisible()
+    expect(screen.queryByText('Average')).not.toBeInTheDocument()
+    expect(screen.queryByText('n/a')).not.toBeInTheDocument()
+  })
+
+  it('continues to display sampled processing metrics for an async queue', async () => {
+    mockApi(snapshot({ processingStats: { sampleSize: 3, avgProcessingMs: 230, p95ProcessingMs: 400 } }))
+    render(<QueueStatusPanel />)
+
+    expect(await screen.findByText('230ms')).toBeVisible()
+    expect(screen.getByText('400ms')).toBeVisible()
+    expect(screen.getByText('Based on 3 recently completed jobs')).toBeVisible()
+  })
+
+  it('shows refresh progress while preserving the current snapshot', async () => {
+    const nextSnapshot = Promise.withResolvers<QueueStatusSnapshot>()
+    readApiResultOrThrow.mockResolvedValueOnce(snapshot()).mockReturnValueOnce(nextSnapshot.promise)
+    render(<QueueStatusPanel />)
+
+    const refreshButton = await screen.findByRole('button', { name: 'Refresh' })
+    refreshButton.focus()
+    fireEvent.click(refreshButton)
+
+    expect(screen.getByText('Refreshing queue status…')).toBeVisible()
+    expect(screen.getByRole('heading', { name: 'q1' })).toBeVisible()
+    expect(refreshButton).toHaveAttribute('aria-disabled', 'true')
+    expect(refreshButton).toHaveFocus()
+    fireEvent.click(refreshButton)
+    expect(readApiResultOrThrow).toHaveBeenCalledTimes(2)
+
+    nextSnapshot.resolve({ ...snapshot(), queues: [] })
+    expect(await screen.findByText('No registered queues matched this filter.')).toBeVisible()
+    expect(screen.queryByText('Refreshing queue status…')).not.toBeInTheDocument()
+    expect(refreshButton).toHaveAttribute('aria-disabled', 'false')
+    expect(refreshButton).toHaveFocus()
+  })
+
   it('ends in an error state with a retry — not a permanent spinner — when the status request fails', async () => {
     mockApi(new Error('Request aborted'))
     render(<QueueStatusPanel />)
