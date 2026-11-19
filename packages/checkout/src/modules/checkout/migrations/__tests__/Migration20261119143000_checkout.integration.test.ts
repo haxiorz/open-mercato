@@ -99,6 +99,17 @@ describeWithPostgres('checkout link slug ownership on PostgreSQL', () => {
     )).resolves.toMatchObject({ rowCount: 1 })
   })
 
+  it('gives backfilled reservations UUID record IDs for tenant reindexing', async () => {
+    const { rows } = await db.query<{ id: string; slug: string }>(
+      'select b.id, b.slug from checkout_link_slug_owners as b where b.tenant_id = $1 order by b.id',
+      [originalScope.tenantId],
+    )
+    expect(rows).toContainEqual({
+      id: expect.stringMatching(/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/),
+      slug: 'retired',
+    })
+  })
+
   it('keeps a legacy live slug until retirement when multiple tenants used it', async () => {
     await expect(allocate('ambiguous', otherScope, ambiguousLiveLinkId)).resolves.toBe('ambiguous')
     await db.query('update checkout_links set deleted_at = now() where id = $1', [ambiguousLiveLinkId])
@@ -139,7 +150,7 @@ describeWithPostgres('checkout link slug ownership on PostgreSQL', () => {
 
       await expect(addLink(staleCandidate, otherScope.tenantId)).rejects.toMatchObject({
         code: '23505',
-        constraint: 'checkout_link_slug_owners_pkey',
+        constraint: 'checkout_link_slug_owners_slug_unique',
       })
       await expect(allocate('competing', otherScope)).resolves.toBe('competing-2')
     } finally {
