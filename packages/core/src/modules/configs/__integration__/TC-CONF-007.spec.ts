@@ -1,12 +1,15 @@
 import { expect, test } from '@playwright/test'
 import { apiRequest, getAuthToken } from '@open-mercato/core/modules/core/__integration__/helpers/api'
 import { readJsonSafe } from '@open-mercato/core/modules/core/__integration__/helpers/generalFixtures'
+import { login } from '@open-mercato/core/helpers/integration/auth'
 import {
   QUEUE_STATUS_TEST_QUEUE,
   cleanupTestJobs,
   openTestQueue,
   uniqueMarker,
 } from './helpers/queueStatusFixtures'
+import polish from '../i18n/pl.json' with { type: 'json' }
+import type { QueueStatusEntryDto, QueueStatusSnapshot } from '../lib/queue-status.types'
 
 type Snapshot = {
   generatedAt: string
@@ -107,5 +110,57 @@ test.describe('TC-CONF-007: Queue status snapshot (Tier 1)', () => {
 
     const tooLong = await apiRequest(request, 'GET', `/api/configs/queues-status?type=${'x'.repeat(500)}`, { token: adminToken })
     expect(tooLong.status(), 'validation errors are a 400, never a 500').toBe(400)
+  })
+
+  test('keeps Polish count labels and long failure reasons within the queue card', async ({ page }) => {
+    const queue = 'queue-layout-check'
+    const reason = `queue.${'long_failure_code_'.repeat(25)}`
+    const entry: QueueStatusEntryDto = {
+      queue,
+      workerIds: ['test:worker'],
+      concurrency: 1,
+      strategy: 'async',
+      fidelity: 'exact',
+      counts: { waiting: 1, active: 2, completed: 3, failed: 1, delayed: 5 },
+      failedJobs: [{ id: 'failed-job', queue, errorCode: reason }],
+      failedJobsUnavailable: false,
+      inFlightUnavailable: false,
+    }
+    const snapshot: QueueStatusSnapshot = {
+      generatedAt: new Date().toISOString(),
+      filter: { queue: null, type: null },
+      canInspectPayloads: false,
+      queues: [entry, { ...entry, queue: 'second-queue-layout-check', failedJobs: [] }],
+    }
+
+    await login(page, 'admin')
+    await page.context().addCookies([{ name: 'locale', value: 'pl', url: new URL(page.url()).origin }])
+    await page.route('**/api/configs/queues-status', (route) => route.fulfill({ json: snapshot }))
+    await page.goto('/backend/config/queues-status')
+
+    const card = page.getByRole('article').filter({ has: page.getByRole('heading', { name: queue, exact: true }) })
+    const failures = card.getByRole('region', { name: polish['configs.queuesStatus.failed.title'] })
+    for (const width of [1440, 640, 390]) {
+      await page.setViewportSize({ width, height: 900 })
+      for (const count of ['waiting', 'active', 'completed', 'failed', 'delayed'] as const) {
+        const badge = card.getByText(polish[`configs.queuesStatus.counts.${count}`], { exact: true })
+        await expect(badge).toBeVisible()
+        await expect.poll(() => badge.evaluate((element) => {
+          const range = document.createRange()
+          range.selectNodeContents(element)
+          const bounds = element.getBoundingClientRect()
+          const tile = element.parentElement!.getBoundingClientRect()
+          return bounds.right <= tile.right + 1 && Array.from(range.getClientRects()).every(
+            (rect) => rect.left >= bounds.left - 1 && rect.right <= bounds.right + 1,
+          )
+        }), `${count} label fits at ${width}px`).toBe(true)
+      }
+      await expect(failures.getByRole('cell', { name: reason, exact: true })).toBeVisible()
+      await expect.poll(() => failures.evaluate((element) => {
+        const bounds = element.getBoundingClientRect()
+        const cardBounds = element.closest('article')!.getBoundingClientRect()
+        return getComputedStyle(element).overflowX === 'auto' && bounds.left >= cardBounds.left && bounds.right <= cardBounds.right
+      }), `the failures scroll region fits in its card at ${width}px`).toBe(true)
+    }
   })
 })

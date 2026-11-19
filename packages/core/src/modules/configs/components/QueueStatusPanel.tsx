@@ -103,7 +103,7 @@ function FailedJobsTable({
               <td className="py-1 pr-3 font-mono text-xs">{job.id}</td>
               <td className="py-1 pr-3">{job.type ?? '—'}</td>
               <td className="py-1 pr-3">{job.workerId ?? '—'}</td>
-              <td className="max-w-xs wrap-anywhere py-1 pr-3">{reason}</td>
+              <td className="py-1 pr-3 max-w-xs truncate" title={reason}>{reason}</td>
               <td className="py-1 pr-3">{job.attemptsMade ?? '—'}</td>
               <td className="py-1 pr-3">{formatTimestamp(job.failedAt)}</td>
             </>
